@@ -1,0 +1,13 @@
+.idea/*
+src/**/META-INF/*
+.DS_Store
+out/*
+logs/*
+mss.iml
+src/main/resources/c3p0.properties
+src/main/resources/redis.properties
+target/*
+src/main/scala/**/test/*
+src/main/resources/tmp/*
+src/test/scala/**/test/*
+src/test/resources/tmp/*

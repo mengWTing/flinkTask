@@ -1,0 +1,118 @@
+package cn.ffcs.is.mss.analyzer.flink.alert
+
+import java.text.SimpleDateFormat
+import java.util.Date
+
+import cn.ffcs.is.mss.analyzer.bean.BbasOperationPersonnelDownloadEntity
+import cn.ffcs.is.mss.analyzer.druid.model.scala.AlertModel
+import cn.ffcs.is.mss.analyzer.utils.Constants
+import org.apache.flink.api.common.functions.RichMapFunction
+import org.apache.flink.configuration.Configuration
+
+/**
+  * @Auther chenwei
+  * @Description
+  * @Date: Created in 2018/12/10 18:02
+  * @Modified By
+  */
+class OperationPersonnelDownloadWarnJsonMap extends RichMapFunction[(BbasOperationPersonnelDownloadEntity,Long),AlertModel] with GenerateAlertModel {
+
+  var alertName = ""
+  var alertType = ""
+  var alertLevel = 0
+  var alertRegion = ""
+  var alertBusiness = ""
+  var alertDomain = ""
+  var alertIp = ""
+  var alertDevice = ""
+  var alertId = ""
+  var alertRuleId = ""
+  var alertStatus = 0
+  var alertUsername = ""
+  var alertTimeStampFormat = ""
+  var alertAssembly = 19
+
+  override def open(parameters: Configuration): Unit = {
+
+    //获取全局变量
+    val globConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
+    alertName = globConf.getString(Constants.ALERT_STATISTICS_OPERATION_PERSONNEL_DOWNLOAD_ALERT_NAME, "")
+    alertType = globConf.getString(Constants.ALERT_STATISTICS_OPERATION_PERSONNEL_DOWNLOAD_ALERT_TYPE, "")
+    alertRegion = globConf.getString(Constants.ALERT_STATISTICS_OPERATION_PERSONNEL_DOWNLOAD_ALERT_REGION, "")
+    alertBusiness = globConf.getString(Constants.ALERT_STATISTICS_OPERATION_PERSONNEL_DOWNLOAD_ALERT_BUSINESS, "")
+    alertDomain = globConf.getString(Constants.ALERT_STATISTICS_OPERATION_PERSONNEL_DOWNLOAD_ALERT_DOMAIN, "")
+    alertIp = globConf.getString(Constants.ALERT_STATISTICS_OPERATION_PERSONNEL_DOWNLOAD_ALERT_IP, "")
+    alertDevice = globConf.getString(Constants.ALERT_STATISTICS_OPERATION_PERSONNEL_DOWNLOAD_ALERT_DEVICE, "")
+    alertRuleId = globConf.getString(Constants.ALERT_STATISTICS_OPERATION_PERSONNEL_DOWNLOAD_ALERT_RULE_ID, "")
+    alertTimeStampFormat = globConf.getString(Constants.ALERT_STATISTICS_OPERATION_PERSONNEL_DOWNLOAD_ALERT_TIMESTAMP_FORMAT,"")
+    alertAssembly = globConf.getInteger(Constants.ALERT_STATISTICS_OPERATION_PERSONNEL_DOWNLOAD_ALERT_ASSEMBLY, 19)
+
+  }
+
+  override def map(value: (BbasOperationPersonnelDownloadEntity, Long)): AlertModel = {
+
+    val alertModel = new AlertModel()
+    alertModel.alertName = getAlertName(alertName)
+    alertModel.alertTimestamp = getAlertTimestamp(value._1.getWarnDatetime.getTime)
+    alertModel.alertType = getAlertType(alertType)
+    alertModel.alertLevel = getAlertLevel(alertLevel)
+    alertModel.alertRegion = getAlertRegion(alertRegion)
+    alertModel.alertBusiness = getAlertBusiness(alertBusiness)
+    alertModel.alertDomain = getAlertDomain(alertDomain)
+    alertModel.alertSrcIp = getAlertSrcIp(value._1.getSourceIp)
+    alertModel.alertSrcPort = getAlertSrcPort("")
+    alertModel.alertDestIp = getAlertDestIp(value._1.getDestinationIp)
+    alertModel.alertDestPort = getAlertDestPort("")
+    alertModel.alertTimes = getAlertTimes(value._2.toInt)
+    alertModel.alertIp = getAlertIp(alertIp)
+    alertModel.alertDevice = getAlertDevice(alertDevice)
+    alertModel.alertDescription = getAlertDescription(value._1)
+    alertModel.alertId = getAlertId(alertId)
+    alertModel.alertRuleId = getAlertRuleId(alertRuleId)
+    alertModel.alertStatus = getAlertStatus(alertStatus)
+    alertModel.alertUsername = getAlertUsername(alertUsername)
+    alertModel.alertAssembly = getAlertAssembly(alertAssembly)
+
+    //时间时间戳，不发送至安管，方便告警归并
+    alertModel.eventTimeStamp = getEventTimeStamp(value._1.getWarnDatetime.getTime)
+    alertModel
+  }
+
+  override def getAlertName(alertName: String): String = {
+    alertName
+  }
+
+
+  override def getAlertTimestamp(alertTimestamp: Long): String = {
+    val simpleDateFormat = new SimpleDateFormat(alertTimeStampFormat)
+    simpleDateFormat.format(new Date(alertTimestamp))
+  }
+
+  override def getAlertType(alertType: String): String = {
+    alertType
+  }
+
+  override def getAlertLevel(alertLevel: Int): Int = {
+    alertLevel
+  }
+
+  override def getAlertRegion(alertRegion: String): String = {
+    alertRegion
+  }
+
+  override def getAlertBusiness(alertBusiness: String): String = {
+    alertBusiness
+  }
+
+  override def getAlertRuleId(alertRuleId: String): String = {
+    alertRuleId
+  }
+
+  override def getAlertStatus(alertStatus: Int): Int = {
+    alertStatus
+  }
+
+  override def getAlertUsername(alertUsername: String): String = {
+    alertUsername
+  }
+}
