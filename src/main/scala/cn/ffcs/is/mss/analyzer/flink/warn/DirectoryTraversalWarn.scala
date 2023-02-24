@@ -73,6 +73,9 @@ object DirectoryTraversalWarn {
     val kafkaSinkParallelism = confProperties.getIntValue(Constants.DIRECTORY_TRAVERSAL_CONFIG,
       Constants.DIRECTORY_TRAVERSAL_KAFKA_SINK_PARALLELISM)
 
+    val warningSinkTopic = confProperties.getValue(Constants.WARNING_FLINK_TO_DRUID_CONFIG, Constants
+      .WARNING_TOPIC)
+
     //kafka的服务地址
     val brokerList = confProperties.getValue(Constants.FLINK_COMMON_CONFIG, Constants
       .KAFKA_BOOTSTRAP_SERVERS)
@@ -141,28 +144,37 @@ object DirectoryTraversalWarn {
     val directoryTraversalStream = dStream.process(new DetectionDirectoryTraversal)
       .setParallelism(dealParallelism)
 
-    directoryTraversalStream.addSink(new MySQLSink)
+    val value: DataStream[(Object, Boolean)] = directoryTraversalStream.map(_._1)
+    val alertKafkaValue = directoryTraversalStream.map(_._2)
+    value.addSink(new MySQLSink)
       .uid(sqlSinkName)
       .name(sqlSinkName)
       .setParallelism(sqlSinkParallelism)
 
     //获取kafka生产者
     val producer = new FlinkKafkaProducer[String](brokerList, sinkTopic, new SimpleStringSchema())
-    directoryTraversalStream.map(o => JsonUtil.toJson(o._1.asInstanceOf[BbasDirectoryTraversalWarnEntity]))
+    directoryTraversalStream.map(o => JsonUtil.toJson(o._1._1.asInstanceOf[BbasDirectoryTraversalWarnEntity]))
       .addSink(producer)
       .uid(kafkaSinkName)
       .name(kafkaSinkName)
       .setParallelism(kafkaSinkParallelism)
 
+    //将告警数据写入告警库topic
+    val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
+        SimpleStringSchema())
+    alertKafkaValue.addSink(warningProducer).setParallelism(kafkaSinkParallelism)
+
     env.execute(jobName)
   }
 
-  class DetectionDirectoryTraversal extends ProcessFunction[String, (Object, Boolean)] {
+  class DetectionDirectoryTraversal extends ProcessFunction[String, ((Object, Boolean), String)] {
 
     //类型在样本里的位置
     val typeIndexMap = mutable.Map[String, Integer]()
     val indexTypeMap = mutable.Map[Integer, String]()
     var decisionTreeNode: DecisionTreeNode = null
+
+    val inputKafkaValue = ""
 
     override def open(parameters: Configuration): Unit = {
 
@@ -228,8 +240,8 @@ object DirectoryTraversalWarn {
     }
 
 
-    override def processElement(value: String, ctx: ProcessFunction[String, (Object, Boolean)
-    ]#Context, out: Collector[(Object, Boolean)]): Unit = {
+    override def processElement(value: String, ctx: ProcessFunction[String, ((Object, Boolean),String)
+    ]#Context, out: Collector[((Object, Boolean), String)]): Unit = {
 
 
       val operationModelOption = OperationModel.getOperationModel(value)
@@ -246,7 +258,12 @@ object DirectoryTraversalWarn {
           bbasDirectoryTraversalWarnEntity.setSourceIp(operationModel.sourceIp)
           bbasDirectoryTraversalWarnEntity.setUrl(url)
           bbasDirectoryTraversalWarnEntity.setHttpStatus(operationModel.httpStatus)
-          out.collect((bbasDirectoryTraversalWarnEntity.asInstanceOf[Object], false))
+          val inputKafkaValue = operationModel.userName + "|" + "目录遍历告警" + "|" + operationModel.timeStamp + "|" +
+            "" + "|" + operationModel.loginSystem + "|" + "" + "|" +
+            "" + "|" + operationModel.sourceIp + "|" + "" + "|" +
+            operationModel.destinationIp + "|" + "" + "|" + url + "|" +
+            operationModel.httpStatus + "|" + "" + "|" + ""
+          out.collect((bbasDirectoryTraversalWarnEntity.asInstanceOf[Object], false),inputKafkaValue)
 
         }
 

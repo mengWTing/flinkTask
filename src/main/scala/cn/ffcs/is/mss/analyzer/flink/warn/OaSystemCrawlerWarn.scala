@@ -7,7 +7,7 @@ import java.util.Properties
 import cn.ffcs.is.mss.analyzer.bean.OaSystemCrawlerWarningEntity
 import cn.ffcs.is.mss.analyzer.druid.model.scala.OperationModel
 import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
-import cn.ffcs.is.mss.analyzer.flink.unknowRisk.funcation.UnknownRiskUtil.getInputKafkavalue
+import cn.ffcs.is.mss.analyzer.utils.GetInputKafkaValue.getInputKafkaValue
 import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties, JsonUtil}
 import org.apache.flink.api.common.accumulators.LongCounter
 import org.apache.flink.api.common.functions.{RichFilterFunction, RichMapFunction}
@@ -53,7 +53,7 @@ object OaSystemCrawlerWarn {
       .OA_SYSTEM_CRAWLER_WARN_CONFIG, Constants.OA_SYSTEM_CRAWLER_WARN_DEAL_PARALLELISM)
     //sink的并行度
     val sinkParallelism = confProperties.getIntValue(Constants.OA_SYSTEM_CRAWLER_WARN_CONFIG,
-      Constants.OA_SYSTEM_CRAWLER_WARN_KAFKA_SINK_TOPIC)
+      Constants.OA_SYSTEM_CRAWLER_WARN_KAFKA_SINK_PARALLELISM)
 
     //kafka的服务地址
     val brokerList = confProperties.getValue(Constants.FLINK_COMMON_CONFIG, Constants
@@ -173,6 +173,8 @@ object OaSystemCrawlerWarn {
       .keyBy(_._1)
       .process(new OaSystemCrawlerWarnProcessFuncation).setParallelism(dealParallelism)
 
+    val timeValues = timeValue.map(_._1)
+    val timeAlertKafkaValue = timeValue.map(_._2)
 
     //    val urlValue = oaSystemWarnStream.process(new UrlWarnProcessFuncation).setParallelism(dealParallelism)
     val urlValue = oaSystemWarnStream.map(new RichMapFunction[String, (String, ArrayBuffer[Long], mutable.HashSet[String],
@@ -206,19 +208,21 @@ object OaSystemCrawlerWarn {
       })
       .process(new UrlTimeWindowsFuncation).setParallelism(dealParallelism)
 
-    timeValue.addSink(new MySQLSink)
-    urlValue.addSink(new MySQLSink)
+    val urlValues = urlValue.map(_._1)
+    val urlAlertKafkaValue = urlValue.map(_._2)
+    timeValues.addSink(new MySQLSink)
+    urlValues.addSink(new MySQLSink)
     //写入云网kafka
     timeValue
       .map(o => {
-        JsonUtil.toJson(o._1.asInstanceOf[OaSystemCrawlerWarningEntity])
+        JsonUtil.toJson(o._1._1.asInstanceOf[OaSystemCrawlerWarningEntity])
       })
       .addSink(producer)
       .setParallelism(1)
 
     urlValue
       .map(o => {
-        JsonUtil.toJson(o._1.asInstanceOf[OaSystemCrawlerWarningEntity])
+        JsonUtil.toJson(o._1._1.asInstanceOf[OaSystemCrawlerWarningEntity])
       })
       .addSink(producer)
       .setParallelism(1)
@@ -228,37 +232,9 @@ object OaSystemCrawlerWarn {
     val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
         SimpleStringSchema())
 
-    timeValue.map(m => {
-      var inPutKafkaValue = ""
-      try {
-        val entity = m._1.asInstanceOf[OaSystemCrawlerWarningEntity]
-        inPutKafkaValue = entity.getUserName + "|" + "OA爬虫检测" + "|" + entity.getStartTime + "|" +
-          "" + "|" + "" + "|" + "" + "|" +
-          "" + "|" + entity.getSourceIp.split("\\|", -1)(0) + "|" + "" + "|" +
-          entity.getDesIp.split("\\|", -1)(0) + "|" + "" + "|" + "" + "|" +
-          "" + "|" + "" + "|" + ""
-      } catch {
-        case e: Exception => {
-        }
-      }
-      inPutKafkaValue
-    }).addSink(warningProducer).setParallelism(sinkParallelism)
+    timeAlertKafkaValue.addSink(warningProducer).setParallelism(sinkParallelism)
 
-    urlValue.map(m => {
-      var inPutKafkaValue = ""
-      try {
-        val entity = m._1.asInstanceOf[OaSystemCrawlerWarningEntity]
-        inPutKafkaValue = entity.getUserName + "|" + "OA爬虫检测" + "|" + entity.getStartTime.getTime + "|" +
-          "" + "|" + "" + "|" + "" + "|" +
-          "" + "|" + entity.getSourceIp.split("\\|", -1)(0) + "|" + "" + "|" +
-          entity.getDesIp.split("\\|", -1)(0) + "|" + "" + "|" + "" + "|" +
-          "" + "|" + "" + "|" + ""
-      } catch {
-        case e: Exception => {
-        }
-      }
-      inPutKafkaValue
-    }).addSink(warningProducer).setParallelism(sinkParallelism)
+    urlAlertKafkaValue.addSink(warningProducer).setParallelism(sinkParallelism)
 
 
     env.execute(jobName)
@@ -266,7 +242,7 @@ object OaSystemCrawlerWarn {
 
   //  class OaSystemCrawlerWarnProcessFuncation extends ProcessFunction[(OperationModel, String), (Object, Boolean)] {
   class OaSystemCrawlerWarnProcessFuncation extends ProcessFunction[(String, Long, mutable.HashSet[String],
-    mutable.HashSet[String], mutable.HashSet[String]), (Object, Boolean)] {
+    mutable.HashSet[String], mutable.HashSet[String]), ((Object, Boolean), String)] {
     //记录这一用户的srcIp
     lazy val srcIp: ValueState[collection.mutable.HashSet[String]] = getRuntimeContext
       .getState(new ValueStateDescriptor[mutable.HashSet[String]]("srcIp", classOf[collection.mutable.HashSet[String]]))
@@ -292,6 +268,7 @@ object OaSystemCrawlerWarn {
     var AddressUrl: String = _
     var opPath = ""
     var operationPersonnelMap = new mutable.HashMap[String, String]()
+    var inputKafkaValue = ""
 
     override def open(parameters: Configuration): Unit = {
       getRuntimeContext.addAccumulator("DetectCrawlerFunction: Messages received by time", messagesReceived)
@@ -327,8 +304,8 @@ object OaSystemCrawlerWarn {
     }
 
     override def onTimer(timestamp: Long, ctx: ProcessFunction[(String, Long, mutable.HashSet[String],
-      mutable.HashSet[String], mutable.HashSet[String]), (Object, Boolean)]#OnTimerContext,
-                         out: Collector[(Object, Boolean)]): Unit = {
+      mutable.HashSet[String], mutable.HashSet[String]), ((Object, Boolean), String)]#OnTimerContext,
+                         out: Collector[((Object, Boolean), String)]): Unit = {
 
       val last = lastTime.value()
       //如果大于设定的许可时间都没有访问,则清空这个用户下面的记录
@@ -346,8 +323,8 @@ object OaSystemCrawlerWarn {
     override def processElement(i: (String, Long, mutable.HashSet[String],
       mutable.HashSet[String], mutable.HashSet[String]),
                                 ctx: ProcessFunction[(String, Long, mutable.HashSet[String],
-                                  mutable.HashSet[String], mutable.HashSet[String]), (Object, Boolean)]#Context,
-                                out: Collector[(Object, Boolean)]): Unit = {
+                                  mutable.HashSet[String], mutable.HashSet[String]), ((Object, Boolean), String)]#Context,
+                                out: Collector[((Object, Boolean), String)]): Unit = {
       messagesReceived.add(1)
       //设置定时器.........在大于设定的许可时间后,执行定时器 （keyby之后的一类数据）
       val userName = i._1
@@ -430,10 +407,15 @@ object OaSystemCrawlerWarn {
             crawlerWarningEntity.setUserName(userName)
             crawlerWarningEntity.setSourceIp(srcIpSet.mkString("|"))
             crawlerWarningEntity.setDesIp(destIpSet.mkString("|"))
-            crawlerWarningEntity.setCount(refererUrl.value().size)
+            crawlerWarningEntity.setCount(refererUrl.value().size.toLong)
 
+            val inPutKafkaValue = userName + "|" + "OA爬虫检测" + "|" + firstValue + "|" +
+              "" + "|" + "" + "|" + "" + "|" +
+              "" + "|" + srcIpSet.mkString("|") + "|" + "" + "|" +
+              destIpSet.mkString("|") + "|" + "" + "|" + "" + "|" +
+              "" + "|" + "" + "|" + ""
 
-            out.collect((crawlerWarningEntity, true))
+            out.collect((crawlerWarningEntity, true), inPutKafkaValue)
             messagesSend.add(1)
           }
         }
@@ -444,7 +426,7 @@ object OaSystemCrawlerWarn {
 
 
   class UrlTimeWindowsFuncation extends ProcessFunction[(String, mutable.ArrayBuffer[Long], mutable.HashSet[String],
-    mutable.HashSet[String], mutable.HashSet[String]), (Object, Boolean)] {
+    mutable.HashSet[String], mutable.HashSet[String]), ((Object, Boolean), String)] {
     private val messagesReceived = new LongCounter()
     private val messagesSend = new LongCounter()
 
@@ -455,6 +437,7 @@ object OaSystemCrawlerWarn {
     var AddressUrl: String = _
     var opPath = ""
     var operationPersonnelMap = new mutable.HashMap[String, String]()
+    var inputKafkaValue = ""
 
     override def open(parameters: Configuration): Unit = {
       getRuntimeContext.addAccumulator("DetectCrawlerFunction: Messages received by url", messagesReceived)
@@ -488,8 +471,8 @@ object OaSystemCrawlerWarn {
 
     override def processElement(value: (String, ArrayBuffer[Long], mutable.HashSet[String], mutable.HashSet[String],
       mutable.HashSet[String]), ctx: ProcessFunction[(String, ArrayBuffer[Long], mutable.HashSet[String],
-      mutable.HashSet[String], mutable.HashSet[String]), (Object, Boolean)]#Context,
-                                out: Collector[(Object, Boolean)]): Unit = {
+      mutable.HashSet[String], mutable.HashSet[String]), ((Object, Boolean), String)]#Context,
+                                out: Collector[((Object, Boolean), String)]): Unit = {
       val userName = value._1
       val osSystemTimestamp = value._2
       val oaSystemSourceIp = value._3
@@ -530,8 +513,15 @@ object OaSystemCrawlerWarn {
         crawlerWarningEntity.setUserName(userName)
         crawlerWarningEntity.setSourceIp(oaSystemSourceIp.mkString("|"))
         crawlerWarningEntity.setDesIp(oaSystemDesIp.mkString("|"))
-        crawlerWarningEntity.setCount(oaSystemReferUrl.size)
-        out.collect((crawlerWarningEntity, true))
+        crawlerWarningEntity.setCount(oaSystemReferUrl.size.toLong)
+
+        val inPutKafkaValue = userName + "|" + "OA爬虫检测" + "|" + osSystemTimestamp.head + "|" +
+          "" + "|" + "" + "|" + "" + "|" +
+          "" + "|" + oaSystemSourceIp.mkString("|") + "|" + "" + "|" +
+          oaSystemDesIp.mkString("|") + "|" + "" + "|" + "" + "|" +
+          "" + "|" + "" + "|" + ""
+
+        out.collect((crawlerWarningEntity, true), inPutKafkaValue)
         urlOaSet.clear()
         urlAddressSet.clear()
 

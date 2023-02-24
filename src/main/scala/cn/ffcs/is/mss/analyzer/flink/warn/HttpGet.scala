@@ -135,7 +135,9 @@ object HttpGet {
       })
       .process(new HttpGetProcessFunction)
 
-    alertData.addSink(new MySQLSink)
+    val value = alertData.map(_._1)
+    val alertKafkaValue = alertData.map(_._2)
+    value.addSink(new MySQLSink)
       .uid(sqlSinkName)
       .name(sqlSinkName)
       .setParallelism(sqlSinkParallelism)
@@ -143,7 +145,7 @@ object HttpGet {
     //获取kafka生产者
     val producer = new FlinkKafkaProducer[String](brokerList, kafkaSinkTopic, new SimpleStringSchema())
     alertData.map(m => {
-      JsonUtil.toJson(m._1.asInstanceOf[DdosWarnEntity])
+      JsonUtil.toJson(m._1._1.asInstanceOf[DdosWarnEntity])
     })
       .addSink(producer)
       .uid(kafkaSinkName)
@@ -154,29 +156,15 @@ object HttpGet {
     //将告警数据写入告警库topic
     val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
         SimpleStringSchema())
-    alertData.map(m => {
-      var inPutKafkaValue = ""
-      try {
-        val entity = m._1.asInstanceOf[DdosWarnEntity]
-        inPutKafkaValue = "未知用户" + "|" + "DDOS攻击" + "|" + entity.getWarnTime.getTime + "|" +
-          "" + "|" + "" + "|" + "" + "|" +
-          "" + "|" + entity.getSourceIp + "|" + "" + "|" +
-          entity.getDestIp + "|" + "" + "|" + "" + "|" +
-          "" + "|" + "" + "|" + ""
-      } catch {
-        case e: Exception => {
-        }
-      }
-      inPutKafkaValue
-    }).addSink(warningProducer).setParallelism(kafkaSinkParallelism)
+    alertKafkaValue.addSink(warningProducer).setParallelism(kafkaSinkParallelism)
     env.execute(jobName)
 
 
   }
 
-  class HttpGetProcessFunction extends ProcessFunction[(String, String, Int), (Object, Boolean)] {
+  class HttpGetProcessFunction extends ProcessFunction[(String, String, Int), ((Object, Boolean), String)] {
     var threshold: Int = _
-
+    val inputKafkaValue = ""
 
     override def open(parameters: Configuration): Unit = {
       val globConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
@@ -184,8 +172,8 @@ object HttpGet {
     }
 
 
-    override def processElement(value: (String, String, Int), ctx: ProcessFunction[(String, String, Int), (Object,
-      Boolean)]#Context, out: Collector[(Object, Boolean)]): Unit = {
+    override def processElement(value: (String, String, Int), ctx: ProcessFunction[(String, String, Int), ((Object,
+      Boolean), String)]#Context, out: Collector[((Object, Boolean), String)]): Unit = {
       if (value._3 >= threshold) {
         val splits = value._1.split("\\|", -1)
         val timestamp = splits(0).toLong
@@ -198,7 +186,13 @@ object HttpGet {
         httpGetWarn.setOccurCount(value._3)
         httpGetWarn.setWarnType(2)
 
-        out.collect((httpGetWarn, true))
+        val inPutKafkaValue = "未知用户" + "|" + "DDOS攻击_HttpGet" + "|" + timestamp + "|" +
+          "" + "|" + "" + "|" + "" + "|" +
+          "" + "|" + value._2 + "|" + "" + "|" +
+          destIp + "|" + "" + "|" + "" + "|" +
+          "" + "|" + "" + "|" + ""
+
+        out.collect((httpGetWarn, true), inPutKafkaValue)
       }
     }
   }

@@ -8,7 +8,7 @@ import java.util.regex.Pattern
 import cn.ffcs.is.mss.analyzer.bean.BbasOperationPersonnelDownloadEntity
 import cn.ffcs.is.mss.analyzer.druid.model.scala.OperationModel
 import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
-import cn.ffcs.is.mss.analyzer.flink.unknowRisk.funcation.UnknownRiskUtil.getInputKafkavalue
+import cn.ffcs.is.mss.analyzer.utils.GetInputKafkaValue.getInputKafkaValue
 import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties, JsonUtil}
 import org.apache.flink.api.common.functions.RichMapFunction
 import org.apache.flink.configuration.Configuration
@@ -200,7 +200,7 @@ object OperationPersonnelDownload {
         bbasOperationPersonnelDownloadEntity.setDestinationIp(value._1.destinationIp)
         bbasOperationPersonnelDownloadEntity.setUrl(values(6))
 
-        val outValue = getInputKafkavalue(value._1, url, "运维人员下载", "")
+        val outValue = getInputKafkaValue(value._1, url, "运维人员下载", "")
 
         out.collect((bbasOperationPersonnelDownloadEntity, true), outValue)
 

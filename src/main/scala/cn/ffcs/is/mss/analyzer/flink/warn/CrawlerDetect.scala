@@ -5,7 +5,7 @@ import java.util.Properties
 import cn.ffcs.is.mss.analyzer.bean.CrawlerWarningEntity
 import cn.ffcs.is.mss.analyzer.druid.model.scala.OperationModel
 import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
-import cn.ffcs.is.mss.analyzer.flink.unknowRisk.funcation.UnknownRiskUtil.getInputKafkavalue
+import cn.ffcs.is.mss.analyzer.utils.GetInputKafkaValue.getInputKafkaValue
 import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties, JsonUtil}
 import org.apache.flink.api.common.accumulators.LongCounter
 import org.apache.flink.api.common.functions.{RichFilterFunction, RichMapFunction}
@@ -369,7 +369,7 @@ object CrawlerDetect {
             crawlerWarningEntity.setLoginSystem(loginSystemSet.mkString(";"))
             crawlerWarningEntity.setSourceIp(srcIpSet.mkString(";"))
             crawlerWarningEntity.setDestinationIp(destIpSet.mkString(";"))
-            val outValue = getInputKafkavalue(i, "", "爬虫检测", "")
+            val outValue = getInputKafkaValue(i, "", "爬虫检测", "")
 
             collector.collect((crawlerWarningEntity, true), outValue)
             messagesSend.add(1)

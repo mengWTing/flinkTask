@@ -7,6 +7,7 @@ import java.util.Properties
 import cn.ffcs.is.mss.analyzer.bean.BbasSqlInjectionWarnEntity
 import cn.ffcs.is.mss.analyzer.druid.model.scala.OperationModel
 import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
+import cn.ffcs.is.mss.analyzer.utils.GetInputKafkaValue.getInputKafkaValue
 import cn.ffcs.is.mss.analyzer.utils.libInjection.sql.Libinjection
 import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties, JsonUtil}
 import org.apache.flink.api.common.functions.RichMapFunction
@@ -16,8 +17,6 @@ import org.apache.flink.streaming.api.scala._
 import org.apache.flink.streaming.connectors.kafka.{FlinkKafkaConsumer, FlinkKafkaProducer}
 import org.apache.flink.streaming.util.serialization.SimpleStringSchema
 import org.apache.flink.util.Collector
-
-import scala.collection.JavaConversions._
 
 /**
   * @Auther chenwei
@@ -58,6 +57,8 @@ object SqlInjectionWarn {
     val kafkaSinkParallelism = confProperties.getIntValue(Constants.FLINK_SQL_INJECTION_CONFIG, Constants
       .SQL_INJECTION_KAFKA_SINK_PARALLELISM)
 
+    val warningSinkTopic = confProperties.getValue(Constants.WARNING_FLINK_TO_DRUID_CONFIG, Constants
+      .WARNING_TOPIC)
 
     //kafka的服务地址
     val brokerList = confProperties.getValue(Constants.FLINK_COMMON_CONFIG, Constants.KAFKA_BOOTSTRAP_SERVERS)
@@ -147,30 +148,38 @@ object SqlInjectionWarn {
       .map(t => (t._1.head, t._2)).setParallelism(dealParallelism)
       .process(new SqlInjectionProcessFunction)
 
-    sqlInjectionWarnStream.addSink(new MySQLSink).uid(sqlSinkName).name(sqlSinkName)
+    val value = sqlInjectionWarnStream.map(_._1)
+    val alertKafkaValue = sqlInjectionWarnStream.map(_._2)
+    value.addSink(new MySQLSink).uid(sqlSinkName).name(sqlSinkName)
       .setParallelism(sqlSinkParallelism)
 
     sqlInjectionWarnStream
       .map(o => {
-        JsonUtil.toJson(o._1.asInstanceOf[BbasSqlInjectionWarnEntity])
+        JsonUtil.toJson(o._1._1.asInstanceOf[BbasSqlInjectionWarnEntity])
       })
       .addSink(producer)
       .uid(kafkaSinkName)
       .name(kafkaSinkName)
       .setParallelism(kafkaSinkParallelism)
 
+        //将告警数据写入告警数据库topic
+        val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
+            SimpleStringSchema())
+    alertKafkaValue.addSink(warningProducer).setParallelism(kafkaSinkParallelism)
+
     env.execute(jobName)
 
   }
 
 
-  class SqlInjectionProcessFunction extends ProcessFunction[(OperationModel, String), (Object, Boolean)] {
+  class SqlInjectionProcessFunction extends ProcessFunction[(OperationModel, String), ((Object, Boolean), String)] {
 
 
     var libinjection: Libinjection = null
 
     var groupSplit: Char = _
     var kvSplit: Char = _
+    var inputKafkaValue = ""
 
     override def open(parameters: Configuration): Unit = {
 
@@ -186,10 +195,9 @@ object SqlInjectionWarn {
     }
 
     override def processElement(value: (OperationModel, String), ctx: ProcessFunction[(OperationModel, String),
-      (Object, Boolean)]#Context, out: Collector[(Object, Boolean)]): Unit = {
+      ((Object, Boolean), String)]#Context, out: Collector[((Object, Boolean), String)]): Unit = {
 
       val values = value._2.split("\\|", -1)
-
 
       if (values.length >= 30) {
 
@@ -278,7 +286,8 @@ object SqlInjectionWarn {
               bbasSqlInjectionWarnEntity.setInjectionValue(injectionValueBuffer.toString)
             }
 
-            out.collect((bbasSqlInjectionWarnEntity.asInstanceOf[Object], false))
+            val outValue = getInputKafkaValue(value._1, url, "SQL注入告警", "")
+            out.collect((bbasSqlInjectionWarnEntity.asInstanceOf[Object], false), outValue)
 
           }
 

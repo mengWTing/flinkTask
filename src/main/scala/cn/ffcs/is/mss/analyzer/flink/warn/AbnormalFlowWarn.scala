@@ -153,33 +153,21 @@ object AbnormalFlowWarn {
       .reduce((o1, o2) => (o2._1, o1._2 + o2._2, o1._3 + o2._3, o2._4, o2._5))
       .process(new FlowDetectProcess).setParallelism(dealParallelism)
 
-    alertData.addSink(new MySQLSink)
+    val value: DataStream[(Object, Boolean)] = alertData.map(_._1)
+    val alertKafkaValue = alertData.map(_._2)
+    value.addSink(new MySQLSink)
       .uid(sqlSinkName)
       .name(sqlSinkName)
       .setParallelism(sqlSinkParallelism)
 
-    alertData.map(m => JsonUtil.toJson(m._1.asInstanceOf[AbnormalFlownWarnEntity])).setParallelism(dealParallelism)
+    alertData.map(m => JsonUtil.toJson(m._1._1.asInstanceOf[AbnormalFlownWarnEntity])).setParallelism(dealParallelism)
       .addSink(producer)
       .uid(kafkaSinkName)
       .name(kafkaSinkName)
       .setParallelism(kafkaSinkParallelism)
 
-  alertData.map(m => {
-      var inPutKafkaValue = ""
-      try {
-        val entity: AbnormalFlownWarnEntity = m._1.asInstanceOf[AbnormalFlownWarnEntity]
-        inPutKafkaValue = entity.getUserName + "|" + "上下行流量异常" + "|" + entity.getWarnTime.getTime + "|" +
-          "" + "|" + "" + "|" + "" + "|" +
-          "" + "|" + entity.getSourceIp + "|" + "" + "|" +
-          entity.getDestinationIp + "|" + "" + "|" + "" + "|" +
-          "" + "|" + "" + "|" + ""
-      } catch {
-        case e: Exception => {
-        }
-      }
-      inPutKafkaValue
-    }).addSink(warningProducer).setParallelism(kafkaSinkParallelism)
-
+  alertKafkaValue.addSink(warningProducer).setParallelism(kafkaSinkParallelism)
+  //alertKafkaValue.print()
 
     env.execute(jobName)
 
@@ -193,7 +181,7 @@ object AbnormalFlowWarn {
    * @description 对用户的流量进行检测,如果超过了历史的门限流量,则进行告警
    * @update [no][date YYYY-MM-DD][name][description]
    */
-  class FlowDetectProcess extends ProcessFunction[(String, Long, Long, String, String), (Object, Boolean)] {
+  class FlowDetectProcess extends ProcessFunction[(String, Long, Long, String, String), ((Object, Boolean), String)] {
 
     //[用户名,(上行流量阈值,下行流量阈值)]
     var flowThresholdMap = new mutable.HashMap[String, (Double, Double)]
@@ -203,6 +191,7 @@ object AbnormalFlowWarn {
     val aggregationSet = new mutable.HashSet[Aggregation]
     var thresholdRatio: Double = _
     var baseCount: Long = _
+    val inputKafkaValue: String = ""
 
     override def open(parameters: Configuration): Unit = {
       val globConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
@@ -245,7 +234,7 @@ object AbnormalFlowWarn {
 
 
     override def processElement(value: (String, Long, Long, String, String), ctx: ProcessFunction[(String, Long,
-      Long, String, String), (Object, Boolean)]#Context, out: Collector[(Object, Boolean)]): Unit = {
+      Long, String, String), ((Object, Boolean), String)]#Context, out: Collector[((Object, Boolean), String)]): Unit = {
 
       val splits = value._1.split("\\|")
       val timestamp = splits(0).toLong
@@ -256,12 +245,17 @@ object AbnormalFlowWarn {
       val outputOctets = value._3
       val sourceIp = value._4
       val destinationIp = value._5
+      val inPutKafkaValue = userName + "|" + "上下行流量异常" + "|" + timestamp + "|" +
+        "" + "|" + "" + "|" + "" + "|" +
+        "" + "|" + sourceIp + "|" + "" + "|" +
+        destinationIp + "|" + "" + "|" + "" + "|" +
+        "" + "|" + "" + "|" + ""
       if (flowThresholdMap.contains(userName)) {
         val thresholdTup = flowThresholdMap(userName)
         val entity = generateWarnEntity(thresholdTup, inputOctets, outputOctets, userName, sourceIp, destinationIp,
           timestamp)
         if (entity != null) {
-          out.collect((entity.asInstanceOf[Object], true))
+          out.collect(((entity.asInstanceOf[Object], true), inPutKafkaValue))
         }
       } else {
         val queryEntity = getQueryDruidEntity(startTimestamp, endTimestamp, tableName, aggregationSet, userName)
@@ -280,7 +274,7 @@ object AbnormalFlowWarn {
         val entity = generateWarnEntity((inputThreshold, outputThreshold), inputOctets, outputOctets, userName,
           sourceIp, destinationIp, timestamp)
         if (entity != null) {
-          out.collect((entity.asInstanceOf[Object], true))
+          out.collect(((entity.asInstanceOf[Object], true), inPutKafkaValue))
         }
       }
     }

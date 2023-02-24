@@ -7,7 +7,7 @@ import java.util.Properties
 import cn.ffcs.is.mss.analyzer.bean.BbasXssInjectionWarnValidityEntity
 import cn.ffcs.is.mss.analyzer.druid.model.scala.OperationModel
 import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
-import cn.ffcs.is.mss.analyzer.flink.unknowRisk.funcation.UnknownRiskUtil.getInputKafkavalue
+import cn.ffcs.is.mss.analyzer.utils.GetInputKafkaValue.getInputKafkaValue
 import cn.ffcs.is.mss.analyzer.utils.libInjection.xss.XSSInjectionUtil
 import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties, JedisUtil, JsonUtil, TimeUtil}
 //import com.google.api.client.util.Sleeper
@@ -326,7 +326,7 @@ object XssInjectionValidity {
 
           }
 
-          val outValue = getInputKafkavalue(value._1, url, "有效XSS注入攻击", packageValue)
+          val outValue = getInputKafkaValue(value._1, url, "有效XSS注入攻击", packageValue)
           out.collect((bbasXssInjectionWarnValidityEntity.asInstanceOf[Object], false), outValue)
 
         }

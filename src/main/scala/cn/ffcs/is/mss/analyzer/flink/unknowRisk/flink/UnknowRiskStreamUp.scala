@@ -1,10 +1,11 @@
 package cn.ffcs.is.mss.analyzer.flink.unknowRisk.flink
 
 import cn.ffcs.is.mss.analyzer.bean.{BbasXssInjectionWarnValidityEntity, UnKnowRiskEntity}
+import cn.ffcs.is.mss.analyzer.utils.GetInputKafkaValue.getInputKafkaValue
 import cn.ffcs.is.mss.analyzer.druid.model.scala.OperationModel
 import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
 import cn.ffcs.is.mss.analyzer.flink.unknowRisk.funcation.IndexOfSimilarityUtile
-import cn.ffcs.is.mss.analyzer.flink.unknowRisk.funcation.UnknownRiskUtil.{getInputKafkavalue, getUrlParameterMap, getUrlParameterTup}
+import cn.ffcs.is.mss.analyzer.flink.unknowRisk.funcation.UnknownRiskUtil.{getUrlParameterMap, getUrlParameterTup}
 import cn.ffcs.is.mss.analyzer.utils.druid.entity._
 import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties, JedisUtil, TimeUtil, _}
 import org.apache.flink.api.common.accumulators.LongCounter
@@ -296,7 +297,7 @@ object UnknowRiskStreamUp {
         unKnowRiskEntity.setIsUnKnowRisk(1)
         unKnowRiskEntity.setRiskName("未知风险-代码注入")
         unKnowRiskEntity.setCmdInfo(operationArr(6))
-        val outValue = getInputKafkavalue(value._1, url, "未知风险-代码注入", packageValue)
+        val outValue = getInputKafkaValue(value._1, url, "未知风险-代码注入", packageValue)
         out.collect((unKnowRiskEntity.asInstanceOf[Object], false), outValue)
       }
 
@@ -312,7 +313,7 @@ object UnknowRiskStreamUp {
               if (urlMap("cmd").contains(i)) {
                 orderMessageEstimate.add(1)
                 unKnowRiskEntity.setCmdInfo(urlMap("cmd"))
-                val outValue = getInputKafkavalue(value._1, url, "未知风险-命令执行", packageValue)
+                val outValue = getInputKafkaValue(value._1, url, "未知风险-命令执行", packageValue)
                 out.collect((unKnowRiskEntity.asInstanceOf[Object], false), outValue)
               }
             }
@@ -323,7 +324,7 @@ object UnknowRiskStreamUp {
             if (i.matches("[(./)(bin/)(sbin/)].*(.)") && (i.contains("./") || i.contains("bin/") || i.contains("sbin/"))) {
               orderMessageEstimate.add(1)
               unKnowRiskEntity.setCmdInfo(i)
-              val outValue = getInputKafkavalue(value._1, url, "未知风险-命令执行", packageValue)
+              val outValue = getInputKafkaValue(value._1, url, "未知风险-命令执行", packageValue)
               out.collect((unKnowRiskEntity.asInstanceOf[Object], false), outValue)
             }
           }
@@ -351,7 +352,7 @@ object UnknowRiskStreamUp {
           } else {
             unKnowRiskEntity.setIsUnKnowRisk(1)
             unKnowRiskEntity.setRiskName("未知风险-首次出现")
-            val outValue = getInputKafkavalue(value._1, url, "未知风险-首次出现", packageValue)
+            val outValue = getInputKafkaValue(value._1, url, "未知风险-首次出现", packageValue)
 
             out.collect((unKnowRiskEntity.asInstanceOf[Object], false), outValue)
             break()
@@ -376,7 +377,7 @@ object UnknowRiskStreamUp {
               } else {
                 unKnowRiskEntity.setIsUnKnowRisk(1)
                 unKnowRiskEntity.setRiskName("未知风险-参数异常")
-                val outValue = getInputKafkavalue(value._1, url, "未知风险-参数异常", packageValue)
+                val outValue = getInputKafkaValue(value._1, url, "未知风险-参数异常", packageValue)
 
                 out.collect((unKnowRiskEntity.asInstanceOf[Object], false), outValue)
                 break()
@@ -440,7 +441,7 @@ object UnknowRiskStreamUp {
                   } else {
                     unKnowRiskEntity.setIsUnKnowRisk(1)
                     unKnowRiskEntity.setRiskName("未知风险-特征")
-                    val outValue = getInputKafkavalue(value._1, url, "未知风险-特征", packageValue)
+                    val outValue = getInputKafkaValue(value._1, url, "未知风险-特征", packageValue)
 
                     out.collect((unKnowRiskEntity.asInstanceOf[Object], false), outValue)
                     break()

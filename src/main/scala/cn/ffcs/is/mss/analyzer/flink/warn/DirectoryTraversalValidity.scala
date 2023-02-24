@@ -7,7 +7,7 @@ import java.util.Properties
 import cn.ffcs.is.mss.analyzer.bean.BbasDirectoryTraversalWarnValidityEntity
 import cn.ffcs.is.mss.analyzer.druid.model.scala.OperationModel
 import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
-import cn.ffcs.is.mss.analyzer.flink.unknowRisk.funcation.UnknownRiskUtil.getInputKafkavalue
+import cn.ffcs.is.mss.analyzer.utils.GetInputKafkaValue.getInputKafkaValue
 import cn.ffcs.is.mss.analyzer.ml.tree.{CART, DecisionTreeNode}
 import cn.ffcs.is.mss.analyzer.ml.utils.MlUtil
 import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties, JedisUtil, JsonUtil}
@@ -284,7 +284,7 @@ object DirectoryTraversalValidity {
             bbasDirectoryTraversalWarnEntity.setValidity(0)
 
           }
-          val outValue = getInputKafkavalue(operationModel, url, "有效路径遍历攻击", jedis.get(operationModel.packagePath))
+          val outValue = getInputKafkaValue(operationModel, url, "有效路径遍历攻击", jedis.get(operationModel.packagePath))
 
           out.collect((bbasDirectoryTraversalWarnEntity.asInstanceOf[Object], false), outValue)
 

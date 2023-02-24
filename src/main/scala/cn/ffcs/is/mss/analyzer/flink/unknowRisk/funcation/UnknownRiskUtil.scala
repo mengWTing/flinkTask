@@ -115,46 +115,4 @@ object UnknownRiskUtil {
       ""
     }
   }
-
-  /**
-   *
-   *
-   * @return String
-   * @author hanyu
-   * @date 2021/11/15 10:23
-   * @description 获取写入druid的前置数据（入kafka的数据） 写入过滤空
-   *              operation - url
-   *              value - hostValue
-   * @update [no][date YYYY-MM-DD][name][description]
-   */
-  def getInputKafkavalue(operation: OperationModel, url: String, alertName: String, packageValue: String): String = {
-    var inPutKafkaValue = ""
-    var returnValue = ""
-    if (packageValue != null && packageValue.length > 200) {
-      returnValue = packageValue.substring(0, 200)
-    } else {
-      returnValue = packageValue
-    }
-
-    if (operation != null) {
-      if (operation.usedPlace.split("\\|", -1).length > 1) {
-        inPutKafkaValue = operation.userName + "|" + alertName + "|" + operation.timeStamp + "|" +
-          operation.loginMajor + "|" + operation.loginSystem + "|" + operation.usedPlace.replaceAll("\\|", "^") + "|" +
-          operation.isRemote + "|" + operation.sourceIp + "|" + operation.sourcePort + "|" +
-          operation.destinationIp + "|" + operation.destinationPort + "|" + url + "|" +
-          operation.httpStatus + "|" + operation.packageType + "|" + returnValue
-      } else {
-        inPutKafkaValue = operation.userName + "|" + alertName + "|" + operation.timeStamp + "|" +
-          operation.loginMajor + "|" + operation.loginSystem + "|" + operation.usedPlace + "|" +
-          operation.isRemote + "|" + operation.sourceIp + "|" + operation.sourcePort + "|" +
-          operation.destinationIp + "|" + operation.destinationPort + "|" + url + "|" +
-          operation.httpStatus + "|" + operation.packageType + "|" + returnValue
-      }
-      inPutKafkaValue
-    } else {
-      ""
-    }
-
-  }
-
 }

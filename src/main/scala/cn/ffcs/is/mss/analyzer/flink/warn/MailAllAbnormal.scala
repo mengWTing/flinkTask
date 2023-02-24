@@ -66,6 +66,9 @@ object MailAllAbnormal {
     val kafkaSinkParallelism = confProperties.getIntValue(Constants.MAIL_LOGIN_ABNORMAL_CONFIG,
       Constants.MAIL_LOGIN_ABNORMAL_KAFKA_SINK_PARALLELISM)
 
+    val warningSinkTopic = confProperties.getValue(Constants.WARNING_FLINK_TO_DRUID_CONFIG, Constants
+      .WARNING_TOPIC)
+
     //kafka的服务地址
     val brokerList = confProperties.getValue(Constants.FLINK_COMMON_CONFIG, Constants
       .KAFKA_BOOTSTRAP_SERVERS)
@@ -141,27 +144,34 @@ object MailAllAbnormal {
       .map(JsonUtil.fromJson[MailModel] _).setParallelism(dealParallelism)
       .process(new AbnormalProcess()).setParallelism(dealParallelism)
 
-    warnData.addSink(new MySQLSink)
+    val value = warnData.map(_._1)
+    val alertKafakValue = warnData.map(_._2)
+    value.addSink(new MySQLSink)
       .uid(sqlSinkName)
       .name(sqlSinkName)
       .setParallelism(sqlSinkParallelism)
 
-    warnData.map(m => JsonUtil.toJson(m._1.asInstanceOf[MailAbnormalLoginIpEntity]))
+    warnData.map(m => JsonUtil.toJson(m._1._1.asInstanceOf[MailAbnormalLoginIpEntity]))
       .addSink(producer)
       .uid(kafkaSinkName)
       .name(kafkaSinkName)
       .setParallelism(kafkaSinkParallelism)
 
+    //将告警数据写入告警库topic
+    val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic,
+      new SimpleStringSchema())
+    alertKafakValue.addSink(warningProducer).setParallelism(kafkaSinkParallelism)
     env.execute(jobName)
 
   }
 
-  class AbnormalProcess() extends ProcessFunction[MailModel, (Object, Boolean)] {
+  class AbnormalProcess() extends ProcessFunction[MailModel, ((Object, Boolean), String)] {
 
     val userInfoMap = new mutable.HashMap[String, mutable.HashMap[String, mutable.HashSet[String]]]()
     var tableName = ""
     var historyLen: Int = _
     val aggregationSet = new mutable.HashSet[Aggregation]
+    val inputKafkaValue = ""
 
     val messagesReceived = new LongCounter()
     val messagesExecuteSucceed = new LongCounter()
@@ -191,8 +201,8 @@ object MailAllAbnormal {
       // TODO:  对历史的ip进行ip归属地查询
     }
 
-    override def processElement(value: MailModel, ctx: ProcessFunction[MailModel, (Object, Boolean)]#Context,
-                                out: Collector[(Object, Boolean)]): Unit = {
+    override def processElement(value: MailModel, ctx: ProcessFunction[MailModel, ((Object, Boolean), String)]#Context,
+                                out: Collector[((Object, Boolean), String)]): Unit = {
       messagesReceived.add(1L)
       val date = new Date
 
@@ -221,7 +231,12 @@ object MailAllAbnormal {
           entity.setLoginIp(srcIp)
           entity.setOperationTime(new Timestamp(operationTime))
           entity.setCreateTime(new Timestamp(createTime))
-          out.collect((entity.asInstanceOf[Object], true))
+          val inputKafkaValue = userName + "|" + "邮件全部异常告警" + "|" + operationTime + "|" +
+            "" + "|" + "" + "|" + "" + "|" +
+            "" + "|" + "" + "|" + "" + "|" +
+            "" + "|" + "" + "|" + "" + "|" +
+            "" + "|" + "" + "|" + ""
+          out.collect((entity.asInstanceOf[Object], true), inputKafkaValue)
         }
       } else {
         messagesExecuteFail.add(1L)

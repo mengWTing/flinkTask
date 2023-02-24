@@ -50,6 +50,9 @@ object DnsTunnelService {
     val dealParallelism = confProperties.getIntValue(Constants.DNS_TUNNENL_SERVICE_CONFIG,
       Constants.DNS_TUNNENL_SERVICE_DEAL_PARALLELISM)
 
+    val warningSinkTopic = confProperties.getValue(Constants.WARNING_FLINK_TO_DRUID_CONFIG, Constants
+      .WARNING_TOPIC)
+
     //check pointing的间隔
     val checkpointInterval = confProperties.getLongValue(Constants.DNS_TUNNENL_SERVICE_CONFIG,
       Constants.DNS_TUNNENL_SERVICE_CHECKPOINT_INTERVAL)
@@ -125,8 +128,22 @@ object DnsTunnelService {
       .filter(new WhiteListFilterFunction).setParallelism(dealParallelism)
       .process(new DnsTunnelServiceMlPro).setParallelism(dealParallelism)
 
+    val value = dStream.map(_._1)
+    val alertKafkaValue = dStream.map(_._2)
     //写入mysql
-    dStream.addSink(new MySQLSink).setParallelism(sinkParallelism)
+    value.addSink(new MySQLSink).setParallelism(sinkParallelism)
+
+    dStream
+      .map(o => {
+        JsonUtil.toJson(o._1._1.asInstanceOf[DnsTunnelServiceEntity])
+      })
+      .addSink(producer)
+      .setParallelism(sinkParallelism)
+
+    //将告警数据写入告警库topic
+    val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
+        SimpleStringSchema())
+    alertKafkaValue.addSink(warningProducer).setParallelism(sinkParallelism)
 
     env.execute(jobName)
 
@@ -175,11 +192,12 @@ object DnsTunnelService {
    * @description svm 判别流数据是否为隐秘隧道
    * @update [no][date YYYY-MM-DD][name][description]
    */
-  class DnsTunnelServiceMlPro extends ProcessFunction[DnsModel, (Object, Boolean)] {
+  class DnsTunnelServiceMlPro extends ProcessFunction[DnsModel, ((Object, Boolean), String)] {
     //svm参数：svmC：惩罚因子，svmTol：容忍极限值  svmMaxPasses：拉格朗日乘子得最多迭代次数
     var svmC = 0D
     var svmTol: Double = 0.00D
     var svmMaxPasses = 0
+    val inputKafkaValue: String = ""
 
     //训练样本数据地址
     var sampleDataPath = ""
@@ -330,8 +348,8 @@ object DnsTunnelService {
 
 
     //判断数据流中数据是否满足告警条件
-    override def processElement(value: DnsModel, ctx: ProcessFunction[DnsModel, (Object, Boolean)]#Context,
-                                out: Collector[(Object, Boolean)]): Unit = {
+    override def processElement(value: DnsModel, ctx: ProcessFunction[DnsModel, ((Object, Boolean), String)]#Context,
+                                out: Collector[((Object, Boolean), String)]): Unit = {
       val dnsValue = value.queryDomainName
       var preListArr = List.fill(traitNum)("0")
       var indexFlag = 0
@@ -356,7 +374,12 @@ object DnsTunnelService {
         dnsTunnelServiceEntity.setQueryResult(value.queryResult)
         dnsTunnelServiceEntity.setReplayCode(value.replyCode)
         dnsTunnelServiceEntity.setQueryDomainName(value.queryDomainName)
-        out.collect((dnsTunnelServiceEntity.asInstanceOf[Object], false))
+        val inputKafkaValue = "未知用户" + "|" + "Dns隐秘隧道检测" + "|" + value.timeStamp + "|" +
+          "" + "|" + "" + "|" + "" + "|" +
+          "" + "|" + "" + "|" + "" + "|" +
+          "" + "|" + "" + "|" + value.queryDomainName + "|" +
+          "" + "|" + "" + "|" + ""
+        out.collect((dnsTunnelServiceEntity.asInstanceOf[Object], false), inputKafkaValue)
 
       }
 

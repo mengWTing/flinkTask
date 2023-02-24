@@ -6,7 +6,7 @@ import cn.ffcs.is.mss.analyzer.bean.BbasUaAttackAttemptEntity
 import cn.ffcs.is.mss.analyzer.druid.model.scala.OperationModel
 import cn.ffcs.is.mss.analyzer.druid.model.scala.OperationModel.getHost
 import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
-import cn.ffcs.is.mss.analyzer.flink.unknowRisk.funcation.UnknownRiskUtil.getInputKafkavalue
+import cn.ffcs.is.mss.analyzer.utils.GetInputKafkaValue.getInputKafkaValue
 import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties, JedisUtil, JsonUtil}
 import org.apache.flink.configuration.Configuration
 import org.apache.flink.streaming.api.functions.ProcessFunction
@@ -142,7 +142,6 @@ object AttackAttemptWarn {
     var jedisPool: JedisPool = _
     var jedis: Jedis = _
     var packageValue = ""
-
     override def open(parameters: Configuration): Unit = {
       val globConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
       attackKeyStr = globConf.getString(Constants.ATTACK_ATTEMPT_KEY_STRING, "")
@@ -190,7 +189,7 @@ object AttackAttemptWarn {
           if (OperationModel.getOperationModel(value).isDefined) {
             val head: OperationModel = OperationModel.getOperationModel(value).head
             packageValue = jedis.get(head.packagePath)
-            outValue = getInputKafkavalue(head, operationArr(6), "UA攻击", packageValue)
+            outValue = getInputKafkaValue(head, operationArr(6), "UA攻击", packageValue)
           } else {
             outValue = ""
           }

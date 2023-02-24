@@ -68,6 +68,9 @@ object DownloadCount {
     //写入kafka的并行度
     val kafkaSinkParallelism = confProperties.getIntValue(Constants.FLINK_DOWNLOAD_COUNT_CONFIG, Constants.DOWNLOAD_COUNT_KAFKA_SINK_PARALLELISM)
 
+    val warningSinkTopic = confProperties.getValue(Constants.WARNING_FLINK_TO_DRUID_CONFIG, Constants
+      .WARNING_TOPIC)
+
     //kafka的服务地址
     val brokerList = confProperties.getValue(Constants.FLINK_COMMON_CONFIG, Constants.KAFKA_BOOTSTRAP_SERVERS)
     //flink消费的group.id
@@ -125,18 +128,25 @@ object DownloadCount {
 
       .process(new DownloadCountProcess(timeStamp)).setParallelism(dealParallelism)
 
+    val value = downloadCountStream.map(_._1)
+    val alertKafkaValue = downloadCountStream.map(_._2)
     //将告警写入数据库
-    downloadCountStream.addSink(new MySQLSink).setParallelism(sqlSinkParallelism).uid(sqlSinkName).name(sqlSinkName)
+    value.addSink(new MySQLSink).setParallelism(sqlSinkParallelism).uid(sqlSinkName).name(sqlSinkName)
 
     //将告警发送至安管平台
     downloadCountStream
       .map(o => {
-        JsonUtil.toJson(o._1.asInstanceOf[BbasDownloadCountWarnImproveEntity])
+        JsonUtil.toJson(o._1._1.asInstanceOf[BbasDownloadCountWarnImproveEntity])
       })
       .addSink(producer)
       .uid(kafkaSinkName)
       .name(kafkaSinkName)
       .setParallelism(kafkaSinkParallelism)
+
+    //将告警数据写入告警库topic
+    val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
+        SimpleStringSchema())
+    alertKafkaValue.addSink(warningProducer).setParallelism(kafkaSinkParallelism)
 
     env.execute(jobName)
 
@@ -235,9 +245,10 @@ object DownloadCount {
    * @description 下载异常检测业务逻辑
    * @update [no][date YYYY-MM-DD][name][description]
    */
-  class DownloadCountProcess(timeStamp: Long) extends ProcessFunction[(String, mutable.HashSet[String], Double), (Object,
-    Boolean)] {
+  class DownloadCountProcess(timeStamp: Long) extends ProcessFunction[(String, mutable.HashSet[String], Double), ((Object,
+    Boolean), String)] {
 
+    val inputKafkaValue = ""
     var sqlHelper: SQLHelper = null
     var druidStartTime = 0L
     var tableName = ""
@@ -276,8 +287,8 @@ object DownloadCount {
     }
 
     override def processElement(value: (String, mutable.HashSet[String], Double), ctx: ProcessFunction[(String,
-      mutable.HashSet[String], Double), (Object,
-      Boolean)]#Context, out: Collector[(Object, Boolean)]): Unit = {
+      mutable.HashSet[String], Double), ((Object,
+      Boolean), String)]#Context, out: Collector[((Object, Boolean), String)]): Unit = {
       val valueArr = value._1.split("\\|", -1)
       //获取用户名
       val userName = valueArr(0)
@@ -313,7 +324,12 @@ object DownloadCount {
         bbasDownloadCountWarnEntity.setUsername(userName)
         bbasDownloadCountWarnEntity.setDownloadFileName(value._2.mkString("|"))
         bbasDownloadCountWarnEntity.setWarnDatetime(new Timestamp(timeStamp - TimeUtil.DAY_MILLISECOND))
-        out.collect((bbasDownloadCountWarnEntity, true))
+        val inputKafkaValue = userName + "|" + "下载次数异常" + "|" + (timeStamp - TimeUtil.DAY_MILLISECOND) + "|" +
+          "" + "|" + "" + "|" + "" + "|" +
+          "" + "|" + "" + "|" + "" + "|" +
+          "" + "|" + "" + "|" + "" + "|" +
+          "" + "|" + "" + "|" + ""
+        out.collect((bbasDownloadCountWarnEntity, true), inputKafkaValue)
       }
 
 

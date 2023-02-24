@@ -1,9 +1,12 @@
 package cn.ffcs.is.mss.analyzer.flink.webbuganalyse
 
+import java.sql.Timestamp
+import java.util.Properties
+
 import cn.ffcs.is.mss.analyzer.bean.PermeateSoftwareFlowWarnEntity
 import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
 import cn.ffcs.is.mss.analyzer.flink.webbuganalyse.utils.EnglishOrCode
-import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties, JsonUtil, KeLaiTimeUtils}
+import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties, KeLaiTimeUtils}
 import org.apache.flink.api.common.functions.{RichFlatMapFunction, RichMapFunction}
 import org.apache.flink.configuration.Configuration
 import org.apache.flink.streaming.api.TimeCharacteristic
@@ -16,8 +19,6 @@ import org.apache.flink.streaming.util.serialization.SimpleStringSchema
 import org.apache.flink.util.Collector
 import org.json.{JSONArray, JSONException, JSONObject}
 
-import java.sql.Timestamp
-import java.util.Properties
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 import scala.util.control.Breaks._
@@ -124,8 +125,9 @@ object PermeateSoftwareFlowAnalyse {
         override def checkAndGetNextWatermark(lastElement: String, extractedTimestamp: Long): Watermark = {
           new Watermark(extractedTimestamp - 10000)
         }
+
         override def extractTimestamp(element: String, previousElementTimestamp: Long): Long = {
-          element.split("\\|", -1)(3) .toLong
+          element.split("\\|", -1)(3).toLong
         }
       }).setParallelism(dealParallelism)
 
@@ -179,16 +181,14 @@ object PermeateSoftwareFlowAnalyse {
     var acceptAb = new mutable.ArrayBuffer[String]()
     var xffFlagAb = new mutable.ArrayBuffer[String]()
     var contentLengthAb = new mutable.ArrayBuffer[String]()
-    var usrAgentStr = ""
-    var acceptStr = ""
+    var usrAgentStr = "Mozilla/5.0(WindowsNT6.1;WOW64)AppleWebKit/535.1(KHTML,likeGecko)Chrome/14.0.835.163Safari/535.1|Mozilla/5.0(WindowsNT6.1;WOW64;rv:6.0)Gecko/20100101Firefox/6.0|Mozilla/5.0(WindowsNT6.1;WOW64)AppleWebKit/534.50(KHTML,likeGecko)Version/5.1Safari/534.50\"BOpera/9.80(WindowsNT6.1;U;zh-cn)Presto/2.9.168Version/11.5|Mozilla/5.0(compatible;MSIE9.0;WindowsNT6.1;Win64;x64;Trident/5.0;.NETCLR2.0.50727;SLCC2;.NETCLR3.5.30729;.NETCLR3.0.30729;MediaCenterPC6.0;InfoPath.3;.NET4.0C;TabletPC2.0;.NET4.0E)|Mozilla/4.0(compatible;MSIE8.0;WindowsNT6.1;WOW64;Trident/4.0;SLCC2;.NETCLR2.0.50727;.NETCLR3.5.30729;.NETCLR3.0.30729;MediaCenterPC6.0;.NET4.0C;InfoPath.3)|Mozilla/4.0(compatible;MSIE8.0;WindowsNT5.1;Trident/4.0;GTB7.0)|Mozilla/4.0(compatible;MSIE7.0;WindowsNT5.1),7|Mozilla/4.0(compatible;MSIE6.0;WindowsNT5.1;SV1)|Mozilla/5.0(Windows;U;WindowsNT6.1;)AppleWebKit/534.12(KHTML,likeGecko)Maxthon/3.0Safari/534.12|Mozilla/4.0(compatible;MSIE7.0;WindowsNT6.1;WOW64;Trident/5.0;SLCC2;.NETCLR2.0.50727;.NETCLR3.5.30729;.NETCLR3.0.30729;MediaCenterPC6.0;InfoPath.3;.NET4.0C;.NET4.0E)|Mozilla/4.0(compatible;MSIE7.0;WindowsNT6.1;WOW64;Trident/5.0;SLCC2;.NETCLR2.0.50727;.NETCLR3.5.30729;.NETCLR3.0.30729;MediaCenterPC6.0;InfoPath.3;.NET4.0C;.NET4.0E;SE2.XMetaSr1.0)|Mozilla/5.0(Windows;U;WindowsNT6.1;en-US)AppleWebKit/534.3(KHTML,likeGecko)Chrome/6.0.472.33Safari/534.3SE2.XMetaSr|Mozilla/5.0(compatible;MSIE9.0;WindowsNT6.1;WOW64;Trident/5.0;SLCC2;.NETCLR2.0.50727;.NETCLR3.5.30729;.NETCLR3.0.30729;MediaCenterPC6.0;InfoPath.3;.NET4.0C;.NET4.0E)|Mozilla/5.0(WindowsNT6.1)AppleWebKit/535.1(KHTML,likeGecko)Chrome/13.0.782.41Safari/535.1QQBrowser/6.9.11079.20|Mozilla/4.0(compatible;MSIE7.0;WindowsNT6.1;WOW64;Trident/5.0;SLCC2;.NETCLR2.0.50727;.NETCLR3.5.30729;.NETCLR3.0.30729;MediaCenterPC6.0;InfoPath.3;.NET4.0C;.NET4.0E)QQBrowser/6.9.11079|Mozilla/5.0(compatible;MSIE9.0;WindowsNT6.1;WOW64;Trident/5.0)"
+    var acceptStr = "text/html,image/gif,image/jpeg,*;q=.2,*/*;q=.2|text/html,image/gif,image/jpeg,;q=.2,/;q=.2|text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9"
     var xffFlagStr = ""
     var cookieStr = ""
     var urlRegex = ""
 
     override def open(parameters: Configuration): Unit = {
       val globConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
-      usrAgentStr = globConf.getString(Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_USER_AGENT_LIST, "")
-      acceptStr = globConf.getString(Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_ACCEPT, "")
       xffFlagStr = globConf.getString(Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_XFF_FLAG, "")
       cookieStr = globConf.getString(Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_COOKIE_ICE, "")
       urlRegex = globConf.getString(Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_URL_REGEX, "")
@@ -241,160 +241,240 @@ object PermeateSoftwareFlowAnalyse {
       val urlIsJavaCode = getIsJavaCode(urlSet)
       val isIceScorpion = getIsIceScorpionAlert(userAgentSet, usrAgentAb, acceptSet, acceptAb, cookieSet, cookieStr,
         contentLengthSet, contentLengthAb, cacheControlSet)
-      val isGodzilla = getIsGodzilla(cookieSet, acceptSet, cacheControlSet)
-      val isUrlWebShell = getUrlWebShellTrait(urlSet)
+      val isGodzilla: ArrayBuffer[(ArrayBuffer[String], ArrayBuffer[String])] = getIsGodzilla(cookieSet, acceptSet, cacheControlSet)
+      val isUrlWebShell = getUrlWebShellTrait(urlSet, urlRegex)
       val isShiroLeak = getIsShiroLeak(cookieSet)
 
-      if (isXffAlert._1) {
-        entity.setAlertType("XFF注入攻击")
-        entity.setAlertXff(isXffAlert._2)
-        out.collect(entity, true)
-      } else if (urlIsJavaCode._1) {
-        entity.setAlertType("struts2远程代码注入")
-        entity.setAlertUrl(urlIsJavaCode._2)
-        out.collect(entity, true)
-      } else if (isGodzilla._1) {
-        entity.setAlertType("疑似哥斯拉软件渗透")
-        entity.setAlertCookie(isGodzilla._2)
-        entity.setAlertAccept(isGodzilla._3)
-        out.collect(entity, true)
-      } else if (isIceScorpion._1) {
-        entity.setAlertType("疑似冰蝎软件渗透")
-        entity.setAlertUseragent(isIceScorpion._2)
-        entity.setAlertAccept(isIceScorpion._3)
-        entity.setAlertCookie(isIceScorpion._6)
-        out.collect(entity, true)
-      } else if (isUrlWebShell._1) {
-        entity.setAlertType("Web-Shell")
-        entity.setAlertUrl(isUrlWebShell._2)
-        out.collect(entity, true)
-      } else if (isShiroLeak._1) {
-        entity.setAlertType("Shiro漏洞利用")
-        entity.setAlertCookie(isShiroLeak._2)
-        out.collect(entity, true)
+      if (isXffAlert.nonEmpty) {
+        for (i <- isXffAlert) {
+          entity.setAlertType("XFF注入攻击")
+          entity.setAlertXff(i)
+          out.collect(entity, true)
+        }
+      }
+      if (urlIsJavaCode.nonEmpty) {
+        for (i <- urlIsJavaCode) {
+          entity.setAlertType("struts2远程代码注入")
+          entity.setAlertUrl(i)
+          out.collect(entity, true)
+        }
       }
 
+      if (isGodzilla.nonEmpty) {
+        for (i <- isGodzilla) {
+          entity.setAlertType("疑似哥斯拉软件渗透")
+          entity.setAlertCookie(i._1.toString().substring(12, i._1.toString.length - 1))
+          entity.setAlertAccept(i._2.toString().substring(12, i._2.toString.length - 1))
+          out.collect(entity, true)
+        }
+      }
+      if (isIceScorpion.nonEmpty) {
+        for (i <- isIceScorpion) {
+          entity.setAlertType("疑似冰蝎软件渗透")
+          entity.setAlertUseragent(i._1.toString().substring(12, i._1.toString.length - 1))
+          entity.setAlertAccept(i._2.toString().substring(12, i._2.toString.length - 1))
+          entity.setAlertCookie(i._5.toString().substring(12, i._5.toString.length - 1))
+          out.collect(entity, true)
+        }
+      }
+      if (isUrlWebShell.nonEmpty) {
+        for (i <- isUrlWebShell) {
+          entity.setAlertType("Web-Shell")
+          entity.setAlertUrl(i)
+          out.collect(entity, true)
+        }
+      }
+      if (isShiroLeak.nonEmpty) {
+        for (i <- isShiroLeak) {
+          entity.setAlertType("Shiro漏洞利用")
+          entity.setAlertCookie(i)
+          out.collect(entity, true)
+        }
+      }
     }
 
-    def getIsShiroLeak(cookieSet: mutable.HashSet[String]): (Boolean, String) = {
-      var shiroTrait = (false, "")
+    def getIsShiroLeak(cookieSet: mutable.HashSet[String]): ArrayBuffer[String] = {
+      val isShiroLeak = new ArrayBuffer[String]()
       for (i <- cookieSet) {
         val cookieStr = i.toLowerCase().replaceAll(" ", "")
         if (cookieStr.contains("rememberme=deleteme") || cookieStr.contains("rememberme=1")) {
-          shiroTrait = (true, i)
+          isShiroLeak.append(i)
         }
       }
-      shiroTrait
+      isShiroLeak
     }
-
 
     def getIsIceScorpionAlert(userAgentSet: mutable.HashSet[String], usrAgentAb: ArrayBuffer[String],
                               acceptSet: mutable.HashSet[String], acceptAb: ArrayBuffer[String],
                               cookieSet: mutable.HashSet[String], cookieStr: String,
                               contentLengthSet: mutable.HashSet[String], contentLengthAb: mutable.ArrayBuffer[String],
-                              cacheControlSet: mutable.HashSet[String]): (Boolean, String, String, String, String, String) = {
+                              cacheControlSet: mutable.HashSet[String])
+    : ArrayBuffer[Tuple5[ArrayBuffer[String], ArrayBuffer[String], ArrayBuffer[String], ArrayBuffer[String], ArrayBuffer[String]]] = {
 
-      val UaTrait = getFirstSetContainsSecondAbFunction(userAgentSet, usrAgentAb)
-      val AcceptTrait = getFirstSetContainsSecondAbFunction(acceptSet, acceptAb)
-      val contentLengthTrait = getFirstSetContainsSecondAbFunction(contentLengthSet, contentLengthAb)
+      val iceScorpionAlertBuffer = new ArrayBuffer[Tuple5[ArrayBuffer[String], ArrayBuffer[String], ArrayBuffer[String], ArrayBuffer[String], ArrayBuffer[String]]]()
 
-      var cacheControlTrait = (false, "")
-      for (cacheControl <- cacheControlSet) {
-        if (cacheControl.contains("no-cache")) {
-          cacheControlTrait = (true, cacheControl)
-        }
+      val UaTrait: ArrayBuffer[String] = getFirstSetContainsSecondAbFunction(userAgentSet, usrAgentAb)
+      val AcceptTrait: ArrayBuffer[String] = getFirstSetContainsSecondAbFunction(acceptSet, acceptAb)
+      val contentLengthTrait: ArrayBuffer[String] = getFirstSetContainsSecondAbFunction(contentLengthSet, contentLengthAb)
+
+      val cacheControlTrait = getIsCacheControl(cacheControlSet)
+      val cookieTrait = getIsCookie(cookieSet)
+
+      val tuple5 = Tuple5(UaTrait, AcceptTrait, contentLengthTrait, cacheControlTrait, cookieTrait)
+      val out = innerBufferSumOfNull(tuple5)
+      //内部有两个以上ArrayBuffer不为空时追加
+      if (out > 2) {
+        iceScorpionAlertBuffer.append(tuple5)
       }
-
-      var cookieTrait = (false, "")
-      for (cookie <- cookieSet) {
-        val flagArr = cookieStr.split("\\|", -1)
-        if (cookie.toLowerCase().contains(flagArr(0)) && cookie.toLowerCase().contains(flagArr(1))) {
-          cookieTrait = (true, cookie)
-        }
-      }
-      val tuple1 = (UaTrait._1, AcceptTrait._1, contentLengthTrait._1, cacheControlTrait._1, cookieTrait._1)
-
-      val booleanArr = "true".r.findAllMatchIn(tuple1.toString()).toArray
-      if (booleanArr.length > 2) {
-        (true, UaTrait._2, AcceptTrait._2, contentLengthTrait._2, cacheControlTrait._2, cookieTrait._2)
-      } else {
-        (false, "", "", "", "", "")
-      }
-
-
+      iceScorpionAlertBuffer
     }
 
-    def getUrlWebShellTrait(urlSet: mutable.HashSet[String]): (Boolean, String) = {
+
+    //新增
+    def getIsCacheControl(value: mutable.HashSet[String]): ArrayBuffer[String] = {
+      val cacheControlBuffer = new ArrayBuffer[String]()
+      for (cacheControl <- value) {
+        if (cacheControl.contains("no-cache")) {
+          cacheControlBuffer.append(cacheControl)
+        }
+      }
+      cacheControlBuffer
+    }
+
+    //新增
+    def getIsCookie(value: mutable.HashSet[String]): ArrayBuffer[String] = {
+      val cookieBuffer = new ArrayBuffer[String]()
+      for (cookie <- value) {
+        val flagArr = cookieStr.split("\\|", -1)
+        if (cookie.toLowerCase().contains(flagArr(0)) && cookie.toLowerCase().contains(flagArr(1))) {
+          cookieBuffer.append(cookie)
+        }
+      }
+      cookieBuffer
+    }
+
+    // 判断内部ArrayBuffer不为空的个数
+    def innerBufferSumOfNull(tuple5: (ArrayBuffer[String], ArrayBuffer[String], ArrayBuffer[String], ArrayBuffer[String], ArrayBuffer[String])): Int = {
+      var sum = 0
+      if (tuple5._1.nonEmpty) {
+        sum += 1
+      }
+      if (tuple5._2.nonEmpty) {
+        sum += 1
+      }
+      if (tuple5._3.nonEmpty) {
+        sum += 1
+      }
+      if (tuple5._4.nonEmpty) {
+        sum += 1
+      }
+      if (tuple5._5.nonEmpty) {
+        sum += 1
+      }
+      sum
+    }
+
+    def getUrlWebShellTrait(urlSet: mutable.HashSet[String], urlRegex: String): ArrayBuffer[String] = {
+      val urlWebShellBuffer = new ArrayBuffer[String]()
       var urlTrait = (false, "")
+      //  \.(php|php5|jsp|asp|jspx|asa)\?(\w){1,20}=\d{2,10}^\.(PHP|jsp|asp|jspx|asa)
       val urlRegexArr = urlRegex.split("\\^", -1)
       for (url <- urlSet) {
         if (urlRegexArr(0).r.findAllMatchIn(url.toLowerCase()).nonEmpty ||
           urlRegexArr(1).r.findAllMatchIn(url.toLowerCase()).nonEmpty) {
           urlTrait = (true, url)
+          urlWebShellBuffer.append(url)
         }
       }
-      urlTrait
+      urlWebShellBuffer
     }
-
 
     def getIsGodzilla(cookieSet: mutable.HashSet[String], acceptSet: mutable.HashSet[String],
-                      cacheControlSet: mutable.HashSet[String]): (Boolean, String, String) = {
-      val accept = "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,/;q=0.8"
-      var cookieTrait = (false, "")
-      var acceptTrait = (false, "")
-      var cacheControlTrait = (false, "")
+                      cacheControlSet: mutable.HashSet[String]): ArrayBuffer[Tuple2[ArrayBuffer[String], ArrayBuffer[String]]] = {
 
-      for (cookie <- cookieSet) {
+      val godzillaBuffer = new ArrayBuffer[Tuple2[ArrayBuffer[String], ArrayBuffer[String]]]()
+      val cookieBuffer: ArrayBuffer[String] = cookie(cookieSet)
+      val acceptBuffer: ArrayBuffer[String] = accept(acceptSet)
+      val cacheBuffer: ArrayBuffer[String] = cache(cacheControlSet)
+
+
+      val tuple3 = Tuple3(cookieBuffer, acceptBuffer, cacheBuffer)
+      val tuple2 = Tuple2(cookieBuffer, acceptBuffer)
+      if (tuple3._1.nonEmpty && (tuple3._2.nonEmpty || tuple3._3.nonEmpty)) {
+        godzillaBuffer.append(tuple2)
+        //        (true, cookieTrait._2, acceptTrait._2)
+      }
+      godzillaBuffer
+    }
+
+    def cookie(value: mutable.HashSet[String]): ArrayBuffer[String] = {
+      val cookieBuffer: ArrayBuffer[String] = new ArrayBuffer[String]()
+      for (cookie <- value) {
         if (cookie.endsWith(";")) {
-          cookieTrait = (true, cookie)
+          cookieBuffer.append(cookie)
         }
       }
+      cookieBuffer
+    }
 
-      for (i <- acceptSet) {
+    def accept(value: mutable.HashSet[String]): ArrayBuffer[String] = {
+      val acceptBuffer: ArrayBuffer[String] = new ArrayBuffer[String]()
+      val accept = "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,/;q=0.8"
+      for (i <- value) {
         if (i.replaceAll(" ", "").contains(accept)) {
-          acceptTrait = (true, i)
+          acceptBuffer.append(i)
         }
       }
+      acceptBuffer
+    }
 
-      for (cacheControl <- cacheControlSet) {
+    def cache(value: mutable.HashSet[String]): ArrayBuffer[String] = {
+      val cacheBuffer = new ArrayBuffer[String]()
+      for (cacheControl <- value) {
         if (cacheControl.replaceAll(" ", "").contains("no-store,no-cache,must-revalidate")) {
-          cacheControlTrait = (true, cacheControl)
+          cacheBuffer.append(cacheControl)
         }
       }
+      cacheBuffer
+    }
 
-      if (cookieTrait._1 && (acceptTrait._1 || cacheControlTrait._1)) {
-        (true, cookieTrait._2, acceptTrait._2)
-      } else {
-        (false, "", "")
+    def getIsXffInject(xffSet: mutable.HashSet[String], xffFlagAb: ArrayBuffer[String]): ArrayBuffer[String] = {
+      val isXffInjectBuffer = new ArrayBuffer[String]()
+      for (i <- xffSet) {
+        val funBuffer = getFirstSetContainsSecondAbFunction(xffSet, xffFlagAb)
+        if (funBuffer.nonEmpty) {
+          isXffInjectBuffer.append(i)
+        }
       }
-
+      isXffInjectBuffer
     }
 
+    def getFirstSetContainsSecondAbFunction(value: mutable.HashSet[String], flag: mutable.ArrayBuffer[String]):
+    ArrayBuffer[String] = {
 
-    def getIsXffInject(xffSet: mutable.HashSet[String], xffFlagAb: ArrayBuffer[String]): (Boolean, String) = {
-      getFirstSetContainsSecondAbFunction(xffSet, xffFlagAb)
-    }
-
-    def getFirstSetContainsSecondAbFunction(value: mutable.HashSet[String], flag: mutable.ArrayBuffer[String]): (Boolean, String) = {
+      val firstSetContainsSecondAbBuffer = new ArrayBuffer[String]()
       for (i <- flag) {
         for (j <- value) {
-          if (j.replaceAll(" ", "").contains(i)) {
-            return (true, j)
+          //todo contains or equals
+          if (j.replaceAll(" ", "").equals(i)) {
+            firstSetContainsSecondAbBuffer.append(j)
           }
         }
       }
-      (false, "")
+      firstSetContainsSecondAbBuffer
     }
 
-    def getIsJavaCode(value: mutable.HashSet[String]): (Boolean, String) = {
+
+    def getIsJavaCode(value: mutable.HashSet[String]): ArrayBuffer[String] = {
+      val isJavaAb = new ArrayBuffer[String]()
       for (i <- value) {
         val urlStr = i.replaceAll("/", " ")
         val isJavaCode = EnglishOrCode.IsJavaCode(urlStr)
         if (isJavaCode) {
-          return (true, i)
+          isJavaAb.append(i)
         }
       }
-      (false, "")
+      isJavaAb
     }
 
   }
@@ -551,4 +631,5 @@ object PermeateSoftwareFlowAnalyse {
       }
     }
   }
+
 }

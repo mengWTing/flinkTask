@@ -2,10 +2,11 @@ package cn.ffcs.is.mss.analyzer.flink.warn
 
 import java.sql.Timestamp
 import java.util.{Date, Properties}
-import cn.ffcs.is.mss.analyzer.bean.{UselessAccountEntity, UselessAccountImproveEntity}
+
+import cn.ffcs.is.mss.analyzer.bean.{DdosWarnEntity, UselessAccountEntity, UselessAccountImproveEntity}
 import cn.ffcs.is.mss.analyzer.druid.model.scala.OperationModel
 import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
-import cn.ffcs.is.mss.analyzer.flink.unknowRisk.funcation.UnknownRiskUtil.getInputKafkavalue
+import cn.ffcs.is.mss.analyzer.utils.GetInputKafkaValue.getInputKafkaValue
 import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties, JsonUtil, TimeUtil}
 import org.apache.flink.api.common.state.{ValueState, ValueStateDescriptor}
 import org.apache.flink.configuration.Configuration
@@ -39,6 +40,9 @@ object UselessAccount {
     //mysql sink的名字
     val sqlSinkName = confProperties.getValue(Constants.USELESS_ACCOUNT_CONFIG, Constants
       .USELESS_ACCOUNT_SQL_SINK_NAME)
+    //kafka sink的名字
+    val kafkaSinkName = confProperties.getValue(Constants.USELESS_ACCOUNT_CONFIG, Constants
+      .USELESS_ACCOUNT_KAFKA_SINK_NAME)
     //check pointing的间隔
     val checkpointInterval = confProperties.getLongValue(Constants.USELESS_ACCOUNT_CONFIG,
       Constants.USELESS_ACCOUNT_CHECKPOINT_INTERVAL)
@@ -53,6 +57,8 @@ object UselessAccount {
     val sqlSinkParallelism = confProperties.getIntValue(Constants.USELESS_ACCOUNT_CONFIG,
       Constants.USELESS_ACCOUNT_SINK_PARALLELISM)
 
+    val sinkParallelism = confProperties.getIntValue(Constants.USELESS_ACCOUNT_CONFIG,
+      Constants.USELESS_ACCOUNT_SINK_PARALLELISM)
 
     //kafka的服务地址
     val brokerList = confProperties.getValue(Constants.FLINK_COMMON_CONFIG, Constants
@@ -63,6 +69,9 @@ object UselessAccount {
     //kafka source 的topic
     val kafkaSourceTopic = confProperties.getValue(Constants.OPERATION_FLINK_TO_DRUID_CONFIG,
       Constants.OPERATION_TO_KAFKA_TOPIC)
+    //kafka sink 的topic
+    val kafkaSinkTopic = confProperties.getValue(Constants.USELESS_ACCOUNT_CONFIG, Constants
+      .USELESS_ACCOUNT_KAFKA_SINK_TOPIC)
     val warningSinkTopic = confProperties.getValue(Constants.WARNING_FLINK_TO_DRUID_CONFIG, Constants
       .WARNING_TOPIC)
     //flink全局变量
@@ -118,10 +127,21 @@ object UselessAccount {
       .keyBy(_.userName)
       .process(new UselessAccountProcessFunction)
 
-    alertValue.map(_._1).addSink(new MySQLSink).setParallelism(sqlSinkParallelism)
-      .uid(sqlSinkName).name(sqlSinkName)
+    alertValue.map(_._1).addSink(new MySQLSink)
+      .uid(sqlSinkName).name(sqlSinkName).setParallelism(sqlSinkParallelism)
 
-    alertValue.map(_._2).addSink(warningProducer).setParallelism(sqlSinkParallelism)
+    //获取kafka生产者
+    val producer = new FlinkKafkaProducer[String](brokerList, kafkaSinkTopic, new SimpleStringSchema())
+    alertValue.map(m => {
+      JsonUtil.toJson(m._1._1.asInstanceOf[DdosWarnEntity])
+    })
+      .addSink(producer)
+      .uid(kafkaSinkName)
+      .name(kafkaSinkName)
+      .setParallelism(sinkParallelism)
+
+    //将告警数据写入告警库topic
+    alertValue.map(_._2).addSink(warningProducer).setParallelism(sinkParallelism)
 
 
     env.execute(jobName)
@@ -185,7 +205,7 @@ object UselessAccount {
       uselessAccount.setLastIsRemote(operationModel.isRemote)
       uselessAccount.setLastDownloadFile(operationModel.downFileName)
       userAccountInfo.clear()
-      val outValue = getInputKafkavalue(operationModel, "", "无用账户检测", "")
+      val outValue = getInputKafkaValue(operationModel, "", "无用账户检测", "")
 
       out.collect((uselessAccount, false), outValue)
     }

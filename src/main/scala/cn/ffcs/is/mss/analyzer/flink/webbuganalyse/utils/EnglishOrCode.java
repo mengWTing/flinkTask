@@ -2,6 +2,8 @@ package cn.ffcs.is.mss.analyzer.flink.webbuganalyse.utils;
 
 import org.apache.commons.lang.StringUtils;
 
+import static org.apache.hadoop.yarn.webapp.hamlet.HamletSpec.Media.print;
+
 /**
  * @author hanyu
  * @ClassName EnglishOrCode
@@ -55,10 +57,11 @@ public class EnglishOrCode {
         tokenizer.tokenize(replaced);
         String patternString = tokenizer.getTokensString();
 
-        if (patternString.matches(".*444.*") || patternString.matches("4+")) {
-            return false;
-        } else {
+//        if (patternString.matches(".*444.*") || patternString.matches("4+")) {
+        if (patternString.contains("222222")) {
             return true;
+        } else {
+            return false;
         }
     }
 }

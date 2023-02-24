@@ -183,8 +183,10 @@ object LowVelocityScan {
       .filter(_._2.size > levelFilterSize).setParallelism(dealParallelism)
       .keyBy(_._1)
       .process(new LevelScanProcessFunction).setParallelism(dealParallelism)
-    levelSinkData
-      .addSink(new MySQLSink).uid("level Scan").name("level Scan").setParallelism(sinkParallelism)
+
+    val levelvalue = levelSinkData.map(_._1)
+    val levelalertKafkaValue = levelSinkData.map(_._2)
+    levelvalue.addSink(new MySQLSink).uid("level Scan").name("level Scan").setParallelism(sinkParallelism)
 
 
     /**
@@ -208,10 +210,12 @@ object LowVelocityScan {
       .filter(_._2.size > verticalFilterSize).setParallelism(dealParallelism)
       .keyBy(_._1)
       .process(new VerticalScanProcessFunction).setParallelism(dealParallelism)
-    verticalSinkData
-      .addSink(new MySQLSink).uid("vertical Scan").name("vertical Scan").setParallelism(sinkParallelism)
 
-    verticalSinkData.union(levelSinkData)
+    val verticalValue = verticalSinkData.map(_._1)
+    val verticalAlertKafkaValue = verticalSinkData.map(_._2)
+    verticalValue.addSink(new MySQLSink).uid("vertical Scan").name("vertical Scan").setParallelism(sinkParallelism)
+
+    verticalValue.union(levelvalue)
       .map(o => {
         JsonUtil.toJson(o._1.asInstanceOf[LowVelocityScanEntity])
       })
@@ -221,24 +225,8 @@ object LowVelocityScan {
     //将告警数据写入告警库topic
     val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
         SimpleStringSchema())
-    verticalSinkData.union(levelSinkData)
-      .map(m => {
-      var inPutKafkaValue = ""
-      try {
-        val entity = m._1.asInstanceOf[LowVelocityScanEntity]
-        inPutKafkaValue = "未知用户" + "|" + "慢速扫描" + "|" + entity.getAlertTime.getTime + "|" +
-          "" + "|" + "" + "|" + "" + "|" +
-          "" + "|" + entity.getSourceIp + "|" + "" + "|" +
-          entity.getDestinationIp + "|" + entity.getDestinationPort+ "|" + "" + "|" +
-          "" + "|" + "" + "|" + ""
-      } catch {
-        case e: Exception => {
-        }
-      }
-      inPutKafkaValue
-    }).addSink(warningProducer).setParallelism(kafkaSinkParallelism)
-
-
+    levelalertKafkaValue.union(verticalAlertKafkaValue)
+      .addSink(warningProducer).setParallelism(kafkaSinkParallelism)
     env.execute(jobName)
 
   }
@@ -254,12 +242,12 @@ object LowVelocityScan {
    * @update [no][date YYYY-MM-DD][name][description]
    */
   class LevelScanProcessFunction extends ProcessFunction[(String, mutable.HashSet[String], mutable.ArrayBuffer[Long],
-    mutable.HashSet[String], mutable.HashSet[Long]), (Object, Boolean)] {
+    mutable.HashSet[String], mutable.HashSet[Long]), ((Object, Boolean), String)] {
     val levelReceiveMessage: LongCounter = new LongCounter()
     val levelResultToMysqlMessage: LongCounter = new LongCounter()
     val levelResultNoScanMessage: LongCounter = new LongCounter()
     val levelIntoDecideMessage: LongCounter = new LongCounter()
-
+    val inputKafkaValue = ""
 
     //时间窗口内dip的集合容器
     lazy val levelPreDipVessel: ValueState[mutable.HashSet[String]] =
@@ -299,8 +287,8 @@ object LowVelocityScan {
 
 
     override def onTimer(timestamp: Long, ctx: ProcessFunction[(String, mutable.HashSet[String], ArrayBuffer[Long],
-      mutable.HashSet[String], mutable.HashSet[Long]), (Object, Boolean)]#OnTimerContext,
-                         out: Collector[(Object, Boolean)]): Unit = {
+      mutable.HashSet[String], mutable.HashSet[Long]), ((Object, Boolean), String)]#OnTimerContext,
+                         out: Collector[((Object, Boolean), String)]): Unit = {
 
       levelPreDipVessel.clear()
       levelProtocolVessel.clear()
@@ -365,8 +353,8 @@ object LowVelocityScan {
 
     override def processElement(value: (String, mutable.HashSet[String], ArrayBuffer[Long], mutable.HashSet[String], mutable.HashSet[Long]),
                                 ctx: ProcessFunction[(String, mutable.HashSet[String], ArrayBuffer[Long], mutable.HashSet[String],
-                                  mutable.HashSet[Long]), (Object, Boolean)]#Context,
-                                out: Collector[(Object, Boolean)]): Unit = {
+                                  mutable.HashSet[Long]), ((Object, Boolean), String)]#Context,
+                                out: Collector[((Object, Boolean), String)]): Unit = {
       val time = value._3.get(0)
 
       val predip = value._2
@@ -407,7 +395,13 @@ object LowVelocityScan {
             lowScanEntity.setProtocolId(levelProtocolVessel.value().mkString("|"))
             lowScanEntity.setInputoctets(levelInputOctetsVessel.value().mkString("|"))
             lowScanEntity.setAlertTime(new Timestamp(value._3.last))
-            out.collect(lowScanEntity, true)
+
+            val inputKafkaValue = "未知用户" + "|" + "主动外联" + "|" + value._3.last + "|" +
+              "" + "|" + "" + "|" + "" + "|" +
+              "" + "|" + value._1.split("-")(0) + "|" + "" + "|" +
+              levelPreDipVessel.value().mkString("|") + "|" + value._1.split("-")(1) + "|" + "" + "|" +
+              "" + "|" + "" + "|" + ""
+            out.collect((lowScanEntity, true), inputKafkaValue)
 
             levelPreDipVessel.clear()
             levelProtocolVessel.clear()
@@ -492,11 +486,12 @@ object LowVelocityScan {
    * @update [no][date YYYY-MM-DD][name][description]
    */
   class VerticalScanProcessFunction extends ProcessFunction[(String, mutable.HashSet[String], mutable.ArrayBuffer[Long],
-    mutable.HashSet[String], mutable.HashSet[Long]), (Object, Boolean)] {
+    mutable.HashSet[String], mutable.HashSet[Long]), ((Object, Boolean), String)] {
     val verticalReceiveMessage: LongCounter = new LongCounter()
     val verticalResultToMysqlMessage: LongCounter = new LongCounter()
     val verticalResultNoScanMessage: LongCounter = new LongCounter()
     val verticalIntoDecideMessage: LongCounter = new LongCounter()
+    val inputKafkaValue = ""
 
     //时间窗口内dpt的集合容器
     lazy val verticalPreDptVessel: ValueState[mutable.HashSet[String]] =
@@ -599,7 +594,7 @@ object LowVelocityScan {
 
     override def processElement(value: (String, mutable.HashSet[String], ArrayBuffer[Long], mutable.HashSet[String],
       mutable.HashSet[Long]), ctx: ProcessFunction[(String, mutable.HashSet[String], ArrayBuffer[Long], mutable.HashSet[String],
-      mutable.HashSet[Long]), (Object, Boolean)]#Context, out: Collector[(Object, Boolean)]): Unit = {
+      mutable.HashSet[Long]), ((Object, Boolean), String)]#Context, out: Collector[((Object, Boolean), String)]): Unit = {
 
       val time = value._3.get(0)
 
@@ -640,7 +635,12 @@ object LowVelocityScan {
             lowScanEntity.setProtocolId(verticalProtocolVessel.value().mkString("|"))
             lowScanEntity.setInputoctets(verticalInputOctetsVessel.value().mkString("|"))
             lowScanEntity.setAlertTime(new Timestamp(value._3.last))
-            out.collect(lowScanEntity, true)
+            val inPutKafkaValue = "未知用户" + "|" + "慢速扫描" + "|" + value._3.last + "|" +
+              "" + "|" + "" + "|" + "" + "|" +
+              "" + "|" + value._1.split("\\-")(0) + "|" + "" + "|" +
+              value._1.split("\\-")(1) + "|" + verticalPreDptVessel.value().mkString("|")+ "|" + "" + "|" +
+              "" + "|" + "" + "|" + ""
+            out.collect((lowScanEntity, true), inputKafkaValue)
 
             verticalPreDptVessel.clear()
             verticalProtocolVessel.clear()

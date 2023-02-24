@@ -65,6 +65,8 @@ object AbnormalStatusUser {
     //写入kafka的并行度
     val kafkaSinkParallelism = confProperties.getIntValue(Constants.FLINK_ABNORMAL_STATUS_USER_CONFIG, Constants.ABNORMAL_STATUS_USER_KAFKA_SINK_PARALLELISM)
 
+    val warningSinkTopic = confProperties.getValue(Constants.WARNING_FLINK_TO_DRUID_CONFIG, Constants.
+      WARNING_TOPIC)
     //kafka的服务地址
     val brokerList = confProperties.getValue(Constants.FLINK_COMMON_CONFIG, Constants.KAFKA_BOOTSTRAP_SERVERS)
     //flink消费的group.id
@@ -126,16 +128,22 @@ object AbnormalStatusUser {
       .filter(new isCorrectUsername)
       .process(new AbnormalStatusUserProcess).setParallelism(dealParallelism)
 
-    abnormalStatusUserStream.addSink(new MySQLSink).uid(sqlSinkName).name(sqlSinkName)
+    val value: DataStream[(Object, Boolean)] = abnormalStatusUserStream.map(_._1)
+    val alertKafkaValue = abnormalStatusUserStream.map(_._2)
+    value.addSink(new MySQLSink).uid(sqlSinkName).name(sqlSinkName)
       .setParallelism(sqlSinkParallelism)
 
     abnormalStatusUserStream
-      .map(o => {JsonUtil.toJson(o._1.asInstanceOf[BbasAbnormalStatusUserWarnEntity])})
+      .map(o => {JsonUtil.toJson(o._1._1.asInstanceOf[BbasAbnormalStatusUserWarnEntity])})
       .addSink(producer)
       .uid(kafkaSinkName)
       .name(kafkaSinkName)
       .setParallelism(kafkaSinkParallelism)
 
+    //将告警数据写入告警库topic
+    val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
+        SimpleStringSchema())
+    alertKafkaValue.addSink(warningProducer).setParallelism(kafkaSinkParallelism)
     env.execute(jobName)
 
   }
@@ -147,8 +155,8 @@ object AbnormalStatusUser {
     }
   }
 
-  class AbnormalStatusUserProcess extends ProcessFunction[OperationModel, (Object,
-    Boolean)] {
+  class AbnormalStatusUserProcess extends ProcessFunction[OperationModel, ((Object,
+    Boolean), String)] {
 
     var jedisPool: JedisPool = _
     var jedis: Jedis = _
@@ -157,6 +165,7 @@ object AbnormalStatusUser {
     var CHANNEL_NAME: String = _
     var sqlHelper: SQLHelper = _
     var threadPool : ExecutorService = _
+    val inputKafkaValue: String = ""
 
     override def open(parameters: Configuration): Unit = {
 
@@ -193,7 +202,8 @@ object AbnormalStatusUser {
       threadPool.execute(new RedisListener(jedisPool.getResource, CHANNEL_NAME, USER_STATUS_KEY))
     }
 
-    override def processElement(value: OperationModel, ctx: ProcessFunction[OperationModel, (Object, Boolean)]#Context, out: Collector[(Object, Boolean)]): Unit = {
+    override def processElement(value: OperationModel, ctx: ProcessFunction[OperationModel, ((Object, Boolean), String)]#Context,
+                                out: Collector[((Object, Boolean), String)]): Unit = {
 
       val status = getUserStatus(jedis, sqlHelper, USER_STATUS_MAP, value.userName, USER_STATUS_KEY)
       if (status == null || isAbnormalStatus(status)) {
@@ -205,8 +215,13 @@ object AbnormalStatusUser {
         bbasAbnormalStatusUserWarnEntity.setStatus(status)
         bbasAbnormalStatusUserWarnEntity.setUsername(value.userName)
         bbasAbnormalStatusUserWarnEntity.setWarnDatetime(new Timestamp(value.timeStamp))
+        val inputKafkaValue = value.userName + "|" + "状态异常用户" + "|" + value.timeStamp + "|" +
+          "" + "|" + value.loginSystem + "|" + "" + "|" +
+          "" + "|" + value.sourceIp + "|" + value.sourcePort + "|" +
+          value.destinationIp + "|" + value.destinationPort + "|" + "" + "|" +
+          status + "|" + "" + "|" + ""
 
-        out.collect((bbasAbnormalStatusUserWarnEntity.asInstanceOf[Object], true))
+        out.collect((bbasAbnormalStatusUserWarnEntity.asInstanceOf[Object], true), inputKafkaValue)
       }
 
 

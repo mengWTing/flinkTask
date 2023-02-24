@@ -5,7 +5,7 @@ import java.util.Properties
 import cn.ffcs.is.mss.analyzer.bean.BbasSameTimeDifferentPlaceWarnEntity
 import cn.ffcs.is.mss.analyzer.druid.model.scala.OperationModel
 import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
-import cn.ffcs.is.mss.analyzer.flink.unknowRisk.funcation.UnknownRiskUtil.getInputKafkavalue
+import cn.ffcs.is.mss.analyzer.utils.GetInputKafkaValue.getInputKafkaValue
 import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties, JsonUtil, TimeUtil}
 import org.apache.flink.api.common.accumulators.LongCounter
 import org.apache.flink.api.common.state.{ValueState, ValueStateDescriptor}
@@ -250,7 +250,7 @@ object SameTimeDifferentPlaceWarn {
             bbasSameTimeDifferentPlaceWarnEntity.setLastLoginPlace(lastLogin.loginPlace)
             bbasSameTimeDifferentPlaceWarnEntity.setTodayLoginPlace(currentTodayLoginPlace._1)
 
-            val outValue = getInputKafkavalue(currentLogin, "", "同一时间多地登录", "")
+            val outValue = getInputKafkaValue(currentLogin, "", "同一时间多地登录", "")
 
             out.collect((bbasSameTimeDifferentPlaceWarnEntity, true), outValue)
             messagesSend.add(1)
@@ -271,7 +271,7 @@ object SameTimeDifferentPlaceWarn {
               bbasSameTimeDifferentPlaceWarnEntity.setLastLoginPlace(lastLogin.loginPlace)
               bbasSameTimeDifferentPlaceWarnEntity.setTodayLoginPlace(currentTodayLoginPlace._1)
 
-              val outValue = getInputKafkavalue(currentLogin, "", "同一时间多地登录", "")
+              val outValue = getInputKafkaValue(currentLogin, "", "同一时间多地登录", "")
 
               out.collect((bbasSameTimeDifferentPlaceWarnEntity, true), outValue)
               messagesSend.add(1)

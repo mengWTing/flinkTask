@@ -68,8 +68,8 @@ object SqlInjectionWarnAlert {
     val groupId = confProperties.getValue(Constants.FLINK_ALERT_STATISTICS_SQL_INJECTION_CONFIG,
       Constants.ALERT_STATISTICS_SQL_INJECTION_GROUP_ID)
     //kafka source 的topic
-    val sourceTopic = confProperties.getValue(Constants.SQL_INJECTION_VALIDITY_CONFIG, Constants
-      .SQL_INJECTION_VALIDITY_KAFKA_SINK_TOPIC)
+    val sourceTopic = confProperties.getValue(Constants.FLINK_SQL_INJECTION_CONFIG, Constants
+      .SQL_INJECTION_KAFKA_SINK_TOPIC)
     //kafka sink 的topic
     val sinkTopic = confProperties.getValue(Constants.FLINK_ALERT_STATISTICS_CONFIG, Constants
       .ALERT_STATISTICS_KAFKA_TOPIC)

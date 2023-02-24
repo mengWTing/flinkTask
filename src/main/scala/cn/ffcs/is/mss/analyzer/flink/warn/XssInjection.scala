@@ -8,6 +8,7 @@ import java.util.Properties
 import cn.ffcs.is.mss.analyzer.bean.BbasXssInjectionWarnEntity
 import cn.ffcs.is.mss.analyzer.druid.model.scala.OperationModel
 import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
+import cn.ffcs.is.mss.analyzer.utils.GetInputKafkaValue.getInputKafkaValue
 import cn.ffcs.is.mss.analyzer.utils.libInjection.xss.XSSInjectionUtil
 import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties, JsonUtil}
 import org.apache.catalina.util.RequestUtil
@@ -63,6 +64,8 @@ object XssInjection {
     val kafkaSinkParallelism = confProperties.getIntValue(Constants.FLINK_XSS_INJECTION_CONFIG,
       Constants.XSS_INJECTION_KAFKA_SINK_PARALLELISM)
 
+    val warningSinkTopic = confProperties.getValue(Constants.WARNING_FLINK_TO_DRUID_CONFIG, Constants
+      .WARNING_TOPIC)
 
     //kafka的服务地址
     val brokerList = confProperties.getValue(Constants.FLINK_COMMON_CONFIG, Constants
@@ -164,26 +167,32 @@ object XssInjection {
       .map(t => (t._1.head, t._2)).setParallelism(dealParallelism)
       .process(new XssInjectionProcessFunction)
 
-
-    xssInjectionWarnStream.addSink(new MySQLSink).uid(sqlSinkName).name(sqlSinkName)
+    val value = xssInjectionWarnStream.map(_._1)
+    val alertKafkaValue = xssInjectionWarnStream.map(_._2)
+    value.addSink(new MySQLSink).uid(sqlSinkName).name(sqlSinkName)
       .setParallelism(sqlSinkParallelism)
 
     xssInjectionWarnStream
       .map(o => {
-        JsonUtil.toJson(o._1.asInstanceOf[BbasXssInjectionWarnEntity])
+        JsonUtil.toJson(o._1._1.asInstanceOf[BbasXssInjectionWarnEntity])
       })
       .addSink(producer)
       .uid(kafkaSinkName)
       .name(kafkaSinkName)
       .setParallelism(kafkaSinkParallelism)
 
+    //将告警数据写入告警数据库topic
+    val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
+        SimpleStringSchema())
+    alertKafkaValue.addSink(warningProducer).setParallelism(kafkaSinkParallelism)
+
     env.execute(jobName)
 
   }
 
 
-  class XssInjectionProcessFunction extends ProcessFunction[(OperationModel, String), (Object,
-    Boolean)] {
+  class XssInjectionProcessFunction extends ProcessFunction[(OperationModel, String), ((Object,
+    Boolean), String)] {
 
 
     var xSSInjectionUtil: XSSInjectionUtil = null
@@ -209,11 +218,10 @@ object XssInjection {
     }
 
     override def processElement(value: (OperationModel, String), ctx: ProcessFunction[
-      (OperationModel, String), (Object, Boolean)]#Context, out: Collector[(Object, Boolean)])
-    : Unit = {
+      (OperationModel, String), ((Object, Boolean), String)]#Context,
+                                out: Collector[((Object, Boolean), String)]): Unit = {
 
       val values = value._2.split("\\|", -1)
-
 
       if (values.length >= 30) {
 
@@ -304,7 +312,8 @@ object XssInjection {
             bbasXssInjectionWarnEntity.setInjectionValue(injectionValueBuffer.toString)
           }
 
-          out.collect((bbasXssInjectionWarnEntity.asInstanceOf[Object], false))
+          val outValue = getInputKafkaValue(value._1, url, "XSS注入告警", "")
+          out.collect((bbasXssInjectionWarnEntity.asInstanceOf[Object], false), outValue)
 
         }
 

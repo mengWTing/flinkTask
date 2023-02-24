@@ -3,7 +3,6 @@ package cn.ffcs.is.mss.analyzer.flink.warn
 import cn.ffcs.is.mss.analyzer.bean.ReboundShellWarnEntity
 import cn.ffcs.is.mss.analyzer.druid.model.scala.OperationModel
 import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
-import cn.ffcs.is.mss.analyzer.flink.warn.ActiveOutreachWarn.innerIpVerdict
 import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties}
 import com.twitter.logging.config.BareFormatterConfig.{intoList, intoOption}
 import org.apache.flink.api.common.functions.RichFlatMapFunction
@@ -37,9 +36,10 @@ import scala.collection.mutable.ArrayBuffer
  * */
 object ReboundShellWarn {
   def main(args: Array[String]): Unit = {
-    //    val confProperties = new IniProperties(args(0))
-    val args0 = "G:\\ffcs_flink\\mss\\src\\main\\resources\\flink.ini"
-    val confProperties = new IniProperties(args0)
+//    val args0 = "G:\\ffcs_flink\\mss\\src\\main\\resources\\flink.ini"
+//    val confProperties = new IniProperties(args0)
+    val confProperties = new IniProperties(args(0))
+
     //任务的名字
     val jobName = confProperties.getValue(Constants.REBOUND_SHELL_WARN_CONFIG, Constants
       .REBOUND_SHELL_WARN_CONFIG_JOB_NAME)
@@ -130,8 +130,8 @@ object ReboundShellWarn {
     //设置flink全局变量
     env.getConfig.setGlobalJobParameters(parameters)
 
-    //    env.addSource(consumer).setParallelism(sourceParallelism)
-    val valueStream = env.socketTextStream("192.168.1.24", 9999)
+    val valueStream = env.addSource(consumer).setParallelism(sourceParallelism)
+    //val valueStream = env.socketTextStream("192.168.1.24", 9999)
       .filter(_.split("\\|", -1).length >= 33).setParallelism(1)
       .flatMap(new RichFlatMapFunction[String, (Long, String, String, String, String)] {
         override def flatMap(value: String, out: Collector[(Long, String, String, String, String)]): Unit = {
@@ -167,7 +167,7 @@ object ReboundShellWarn {
 
     val sinkData: DataStream[((Object, Boolean), String)] = valueStream
       .timeWindowAll(Time.seconds(timeWindow), Time.seconds(timeWindow))
-      .process(new ReboundShellProcessFunction).setParallelism(10)
+      .process(new ReboundShellProcessFunction).setParallelism(1)
 
     val mysqlSinkData = sinkData.map(_._1)
     mysqlSinkData.addSink(new MySQLSink)
@@ -198,7 +198,7 @@ object ReboundShellWarn {
       getRuntimeContext.getState(new ValueStateDescriptor[ArrayBuffer[String]]("userNameArr",
         classOf[ArrayBuffer[String]]))
     lazy val sourceIpPortDestIpPortAB: ValueState[ArrayBuffer[String]] =
-      getRuntimeContext.getState(new ValueStateDescriptor[ArrayBuffer[String]] ("sourceIpPortDestIpPort",
+      getRuntimeContext.getState(new ValueStateDescriptor[ArrayBuffer[String]]("sourceIpPortDestIpPort",
         classOf[ArrayBuffer[String]]))
     lazy val urlAB: ValueState[ArrayBuffer[String]] =
       getRuntimeContext.getState(new ValueStateDescriptor[ArrayBuffer[String]]("urlArr",

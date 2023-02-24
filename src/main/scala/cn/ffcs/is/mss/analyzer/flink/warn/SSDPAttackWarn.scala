@@ -122,13 +122,15 @@ object SSDPAttackWarn {
       .keyBy(0)
       .timeWindow(Time.minutes(1L), Time.minutes(1L))
       .reduce((o1, o2) => {
-        (o1._1, o1._2.++:(o2._2)
+        (o1._1, o1._2.++(o2._2)
         )
       })
       .process(new SSDPProcessFunction).setParallelism(dealParallelism)
 
+    val value = alertData.map(_._1)
+    val alertKafkaValue = alertData.map(_._2)
 
-    alertData.addSink(new MySQLSink)
+    value.addSink(new MySQLSink)
       .uid(sqlSinkName)
       .name(sqlSinkName)
       .setParallelism(sqlSinkParallelism)
@@ -136,7 +138,7 @@ object SSDPAttackWarn {
     //获取kafka生产者
     val producer = new FlinkKafkaProducer[String](brokerList, kafkaSinkTopic, new SimpleStringSchema())
     alertData.map(m => {
-      JsonUtil.toJson(m._1.asInstanceOf[DdosWarnEntity])
+      JsonUtil.toJson(m._1._1.asInstanceOf[DdosWarnEntity])
     })
       .addSink(producer)
       .uid(kafkaSinkName)
@@ -147,28 +149,15 @@ object SSDPAttackWarn {
     //将告警数据写入告警库topic
     val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
         SimpleStringSchema())
-    alertData.map(m => {
-      var inPutKafkaValue = ""
-      try {
-        val entity = m._1.asInstanceOf[DdosWarnEntity]
-        inPutKafkaValue = "未知用户" + "|" + "DDOS攻击" + "|" + entity.getWarnTime.getTime + "|" +
-          "" + "|" + "" + "|" + "" + "|" +
-          "" + "|" + entity.getSourceIp + "|" + "" + "|" +
-          entity.getDestIp + "|" + "" + "|" + "" + "|" +
-          "" + "|" + "" + "|" + ""
-      } catch {
-        case e: Exception => {
-        }
-      }
-      inPutKafkaValue
-    }).addSink(warningProducer).setParallelism(kafkaSinkParallelism)
+    alertKafkaValue.addSink(warningProducer).setParallelism(kafkaSinkParallelism)
 
     env.execute(jobName)
 
   }
 
-  class SSDPProcessFunction extends ProcessFunction[(String, ArrayBuffer[QuintetModel]), (Object, Boolean)] {
+  class SSDPProcessFunction extends ProcessFunction[(String, ArrayBuffer[QuintetModel]), ((Object, Boolean), String)] {
     var threshold: Int = _
+    var inputKafkaValue = ""
 
     override def open(parameters: Configuration): Unit = {
       val globConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
@@ -177,7 +166,7 @@ object SSDPAttackWarn {
     }
 
     override def processElement(value: (String, ArrayBuffer[QuintetModel]), ctx: ProcessFunction[(String,
-      ArrayBuffer[QuintetModel]), (Object, Boolean)]#Context, out: Collector[(Object, Boolean)]): Unit = {
+      ArrayBuffer[QuintetModel]), ((Object, Boolean), String)]#Context, out: Collector[((Object, Boolean), String)]): Unit = {
 
       if (value._2.size >= threshold) {
         val splits = value._1.split("-")
@@ -189,7 +178,12 @@ object SSDPAttackWarn {
         ssdpWarndEntity.setWarnTime(new Timestamp(timestamp))
         ssdpWarndEntity.setOccurCount(value._2.size)
         ssdpWarndEntity.setWarnType(1)
-        out.collect((ssdpWarndEntity, true))
+        val inPutKafkaValue = "未知用户" + "|" + "DDOS攻击" + "|" + timestamp + "|" +
+          "" + "|" + "" + "|" + "" + "|" +
+          "" + "|" + value._2.last.sourceIp + "|" + "" + "|" +
+          destIp + "|" + "" + "|" + "" + "|" +
+          "" + "|" + "" + "|" + ""
+        out.collect((ssdpWarndEntity, true), inputKafkaValue)
       }
     }
   }

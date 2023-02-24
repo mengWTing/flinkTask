@@ -15,7 +15,7 @@ import javax.persistence.Table
 import org.apache.flink.api.common.functions.{RichFlatMapFunction, RichMapFunction}
 import org.apache.flink.configuration.Configuration
 import org.apache.flink.streaming.api.TimeCharacteristic
-import org.apache.flink.streaming.api.functions.AssignerWithPunctuatedWatermarks
+import org.apache.flink.streaming.api.functions.{AssignerWithPunctuatedWatermarks, ProcessFunction}
 import org.apache.flink.streaming.api.scala._
 import org.apache.flink.streaming.api.watermark.Watermark
 import org.apache.flink.streaming.api.windowing.time.Time
@@ -226,7 +226,6 @@ object IpVisitWarn {
       .filter(value => !isHttpPort(value._3, httpPortSet))
       .map(new ProduceMap(tcpHighRiskPortSet))
 
-
     //      .print()
     //      .writeAsText("/Users/chenwei/Downloads/warn2/mss/warn.txt").setParallelism(1)
 
@@ -234,11 +233,11 @@ object IpVisitWarn {
     //    .setParallelism(1)
 
 
-    sourceOperationModelStream.addSink(new MySQLSink).setParallelism(sqlSinkParallelism)
+    sourceOperationModelStream.map(_._1).addSink(new MySQLSink).setParallelism(sqlSinkParallelism)
       .uid(sqlSinkName).name(sqlSinkName)
 
     sourceOperationModelStream
-      .map(_._1.asInstanceOf[IpasIpVisitWarnEntity]).setParallelism(1)
+      .map(_._1._1.asInstanceOf[IpasIpVisitWarnEntity]).setParallelism(1)
       .assignTimestampsAndWatermarks(new AssignerWithPunctuatedWatermarks[IpasIpVisitWarnEntity] {
         override def checkAndGetNextWatermark(lastElement: IpasIpVisitWarnEntity,
                                               extractedTimestamp: Long): Watermark =
@@ -261,10 +260,9 @@ object IpVisitWarn {
       .map(new MergeIpVisitWarn).setParallelism(dealParallelism)
       .filter(_.isDefined).setParallelism(dealParallelism)
       .map(_.head).setParallelism(dealParallelism)
-      .addSink(new MySQLSink).setParallelism(1)
 
     sourceOperationModelStream.map(o => {
-      JsonUtil.toJson(o._1.asInstanceOf[IpasIpVisitWarnEntity])
+      JsonUtil.toJson(o._1._1.asInstanceOf[IpasIpVisitWarnEntity])
     })
 
       .addSink(producer)
@@ -274,33 +272,7 @@ object IpVisitWarn {
     //将告警数据写入告警库topic
     val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
         SimpleStringSchema())
-    sourceOperationModelStream.map(m => {
-      var inPutKafkaValue = ""
-      try {
-        val entity = m._1.asInstanceOf[IpasIpVisitWarnEntity]
-        if (entity.getWarnName.nonEmpty && entity.getWarnName != null && !entity.getWarnName.equals("其他")) {
-          inPutKafkaValue = "未知用户" + "|" + "访问高危漏洞告警" + "|" + entity.getWarnDate.getTime + "|" +
-            "" + "|" + "" + "|" + "" + "|" +
-            "" + "|" + entity.getSourceIp + "|" + entity.getSourcePort + "|" +
-            entity.getDestinationIp + "|" + entity.getDestinationPort + "|" + "" + "|" +
-            "" + "|" + "" + "|" + ""
-        } else {
-          inPutKafkaValue = "未知用户" + "|" + "IP互访" + "|" + entity.getWarnDate.getTime + "|" +
-            "" + "|" + "" + "|" + "" + "|" +
-            "" + "|" + entity.getSourceIp + "|" + entity.getSourcePort + "|" +
-            entity.getDestinationIp + "|" + entity.getDestinationPort + "|" + "" + "|" +
-            "" + "|" + "" + "|" + ""
-        }
-
-      } catch {
-        case e: Exception => {
-        }
-      }
-      inPutKafkaValue
-    }).addSink(warningProducer).setParallelism(kafkaSinkParallelism)
-    env.execute(jobName)
-
-
+    sourceOperationModelStream.map(_._2).addSink(warningProducer).setParallelism(kafkaSinkParallelism)
     env.execute(jobName)
 
   }
@@ -717,9 +689,10 @@ object IpVisitWarn {
     tcpHighRiskPortSet
   }
 
-  class ProduceMap(tcpHighRiskPortSet: mutable.Set[Int]) extends RichMapFunction[(Long, String, String, String, Double), (Object, Boolean)] {
+  class ProduceMap(tcpHighRiskPortSet: mutable.Set[Int]) extends RichMapFunction[(Long, String, String, String, Double), ((Object, Boolean), String)] {
 
-    override def map(value: (Long, String, String, String, Double)): (Object, Boolean) = {
+    var inPutKafkaValue = ""
+    override def map(value: (Long, String, String, String, Double)): ((Object, Boolean), String) = {
       val ipasIpVisitWarnEntity = new IpasIpVisitWarnEntity()
       ipasIpVisitWarnEntity.setDestinationIp(value._2)
       ipasIpVisitWarnEntity.setDestinationPort(value._3)
@@ -731,8 +704,22 @@ object IpVisitWarn {
       ipasIpVisitWarnEntity.setVisitCount(value._5.toInt)
       ipasIpVisitWarnEntity.setWarnDate(new Timestamp(value._1))
       ipasIpVisitWarnEntity.setWarnName(getWarnName(value._3.toInt, tcpHighRiskPortSet))
-      (ipasIpVisitWarnEntity.asInstanceOf[Object], true)
 
+      if (ipasIpVisitWarnEntity.getWarnName.nonEmpty && ipasIpVisitWarnEntity.getWarnName != null && !ipasIpVisitWarnEntity.getWarnName.equals("其他")) {
+        val inPutKafkaValue = "未知用户" + "|" + "访问高危漏洞告警" + "|" + value._1 + "|" +
+          "" + "|" + "" + "|" + "" + "|" +
+          "" + "|" + value._4 + "|" + "" + "|" +
+          value._2 + "|" + value._3 + "|" + "" + "|" +
+          "" + "|" + "" + "|" + ""
+      } else {
+        val inPutKafkaValue = "未知用户" + "|" + "IP互访" + "|" + value._1 + "|" +
+          "" + "|" + "" + "|" + "" + "|" +
+          "" + "|" + value._4 + "|" + "" + "|" +
+          value._2 + "|" + value._3 + "|" + "" + "|" +
+          "" + "|" + "" + "|" + ""
+      }
+
+      ((ipasIpVisitWarnEntity, true), inPutKafkaValue)
     }
 
   }

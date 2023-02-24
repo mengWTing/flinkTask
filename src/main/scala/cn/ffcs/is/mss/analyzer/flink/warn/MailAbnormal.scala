@@ -68,6 +68,9 @@ object MailAbnormal {
     val kafkaSinkParallelism = confProperties.getIntValue(Constants.MAIL_LOGIN_ABNORMAL_CONFIG,
       Constants.MAIL_LOGIN_ABNORMAL_KAFKA_SINK_PARALLELISM)
 
+    val warningSinkTopic = confProperties.getValue(Constants.WARNING_FLINK_TO_DRUID_CONFIG, Constants
+      .WARNING_TOPIC)
+
     //kafka的服务地址
     val brokerList = confProperties.getValue(Constants.FLINK_COMMON_CONFIG, Constants
       .KAFKA_BOOTSTRAP_SERVERS)
@@ -107,11 +110,6 @@ object MailAbnormal {
     //druid数据开始的时间
     parameters.setLong(Constants.DRUID_DATA_START_TIMESTAMP, confProperties.getLongValue(Constants
       .FLINK_COMMON_CONFIG, Constants.DRUID_DATA_START_TIMESTAMP))
-
-
-
-
-
 
     //统计时长
     parameters.setInteger(Constants.MAIL_LOGIN_ABNORMAL_HISTORY_LENGTH, confProperties.getIntValue(Constants
@@ -159,22 +157,28 @@ object MailAbnormal {
 
     warnData.print()
 
-    warnData.addSink(new MySQLSink)
+    val value = warnData.map(_._1)
+    val alertKafkaValue = warnData.map(_._2)
+    value.addSink(new MySQLSink)
       .uid(sqlSinkName)
       .name(sqlSinkName)
       .setParallelism(sqlSinkParallelism)
 
-    warnData.map(m => JsonUtil.toJson(m._1.asInstanceOf[MailAbnormalLoginIpEntity]))
+    warnData.map(m => JsonUtil.toJson(m._1._1.asInstanceOf[MailAbnormalLoginIpEntity]))
       .addSink(producer)
       .uid(kafkaSinkName)
       .name(kafkaSinkName)
       .setParallelism(kafkaSinkParallelism)
 
+    //将告警数据写入告警数据库topic
+    val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic,
+      new SimpleStringSchema())
+    alertKafkaValue.addSink(warningProducer).setParallelism(kafkaSinkParallelism)
     env.execute(jobName)
 
   }
 
-  class AbnormalProcess(leaderNameSet: mutable.HashSet[String]) extends ProcessFunction[MailModel, (Object, Boolean)] {
+  class AbnormalProcess(leaderNameSet: mutable.HashSet[String]) extends ProcessFunction[MailModel, ((Object, Boolean), String)] {
 
     val userInfoMap = new mutable.HashMap[String, mutable.HashMap[String, mutable.HashSet[String]]]()
     var tableName = ""
@@ -184,7 +188,7 @@ object MailAbnormal {
     val messagesReceived = new LongCounter()
     val messagesExecuteSucceed = new LongCounter()
     val messagesExecuteFail = new LongCounter()
-
+    val inputKafkaValue = ""
 
     override def open(parameters: Configuration): Unit = {
       val globConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
@@ -232,8 +236,8 @@ object MailAbnormal {
     }
 
 
-    override def processElement(value: MailModel, ctx: ProcessFunction[MailModel, (Object, Boolean)]#Context,
-                                out: Collector[(Object, Boolean)]): Unit = {
+    override def processElement(value: MailModel, ctx: ProcessFunction[MailModel, ((Object, Boolean), String)]#Context,
+                                out: Collector[((Object, Boolean), String)]): Unit = {
       messagesReceived.add(1L)
       val userName = value.userName
       val srcIp = value.sourceIp
@@ -250,7 +254,13 @@ object MailAbnormal {
           entity.setLoginIp(srcIp)
           entity.setOperationTime(new Timestamp(operationTime))
           entity.setCreateTime(new Timestamp(createTime))
-          out.collect((entity.asInstanceOf[Object], true))
+          val inputKafkaValue = userName + "|" + "异常邮件告警" + "|" + operationTime + "|" +
+            "" + "|" + "" + "|" + "" + "|" +
+            "" + "|" + "" + "|" + "" + "|" +
+            "" + "|" + "" + "|" + "" + "|" +
+            "" + "|" + "" + "|" + ""
+
+          out.collect((entity.asInstanceOf[Object], true), inputKafkaValue)
         }
       } else {
         messagesExecuteFail.add(1L)
