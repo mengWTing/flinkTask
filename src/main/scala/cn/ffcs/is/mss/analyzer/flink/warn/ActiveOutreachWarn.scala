@@ -84,6 +84,9 @@ object ActiveOutreachWarn {
     //内网ip文件路径
     parameters.setString(Constants.ACTIVE_OUTREACH_ANALYZE_IP_WHITE_LIST, confProperties.getValue(Constants.
       ACTIVE_OUTREACH_ANALYZE_CONFIG, Constants.ACTIVE_OUTREACH_ANALYZE_IP_WHITE_LIST))
+    //办公网ip文件路径
+    parameters.setString(Constants.ACTIVE_OUTREACH_ANALYZE_OFFICE_IP, confProperties.getValue(Constants.
+      ACTIVE_OUTREACH_ANALYZE_CONFIG, Constants.ACTIVE_OUTREACH_ANALYZE_OFFICE_IP))
     //端口白名单
     parameters.setString(Constants.ACTIVE_OUTREACH_ANALYZE_PORT_WHITE_LIST, confProperties.getValue(Constants.
       ACTIVE_OUTREACH_ANALYZE_CONFIG, Constants.ACTIVE_OUTREACH_ANALYZE_PORT_WHITE_LIST))
@@ -119,8 +122,7 @@ object ActiveOutreachWarn {
         }
       }).setParallelism(dealParallelism)
       .filter(_.outputOctets > flowMinValue).setParallelism(dealParallelism)
-      .filter(_.destinationIp.contains("."))
-      .filter(new ActiveOutreachFilterFunction).setParallelism(dealParallelism)
+      .filter(_.destinationIp.contains(".")).setParallelism(dealParallelism)
       .process(new ActiveOutreachProcessFunction).setParallelism(dealParallelism)
 
     sinkData
@@ -136,6 +138,7 @@ object ActiveOutreachWarn {
     //将告警数据写入告警库topic
     val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
         SimpleStringSchema())
+
     sinkData.map(m => {
       var inPutKafkaValue = ""
       try {
@@ -153,74 +156,6 @@ object ActiveOutreachWarn {
     }).addSink(warningProducer).setParallelism(sinkParallelism)
 
     env.execute(jobName)
-
-  }
-
-  class ActiveOutreachFilterFunction extends RichFilterFunction[QuintetModel] {
-    var flowMinValue = 0L
-    var portWhiteList = ""
-    var ipWhiteListPlath = ""
-    var innerNetIp = new mutable.HashSet[String]()
-    var specialIp = ""
-
-    val ReceiveMessage: LongCounter = new LongCounter()
-    val FilterSuccessMessage: LongCounter = new LongCounter()
-    val FilterFailMessage: LongCounter = new LongCounter()
-
-
-    override def open(parameters: Configuration): Unit = {
-      val globConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
-      portWhiteList = globConf.getString(Constants.ACTIVE_OUTREACH_ANALYZE_PORT_WHITE_LIST, "")
-      ipWhiteListPlath = globConf.getString(Constants.ACTIVE_OUTREACH_ANALYZE_IP_WHITE_LIST, "")
-      flowMinValue = globConf.getLong(Constants.ACTIVE_OUTREACH_ANALYZE_FLOW_MIN_VALUE, 0L)
-      specialIp = globConf.getString(Constants.ACTIVE_OUTREACH_ANALYZE_SPECIAL_IP, "")
-
-      val systemType = globConf.getString(Constants.FILE_SYSTEM_TYPE, "")
-      val fs = FileSystem.get(URI.create(systemType), new org.apache.hadoop.conf.Configuration())
-      val fsDataInputStream = fs.open(new Path(ipWhiteListPlath))
-      val bufferedReader = new BufferedReader(new InputStreamReader(fsDataInputStream))
-      //本地测试
-      //      val stream = new FileReader(new File(""))
-      //      val bufferedReader = new BufferedReader(stream)
-
-      var line: String = bufferedReader.readLine()
-      while (line != null) {
-        val splits = line.split("\\|", -1)
-        if (splits.length > 1) {
-          innerNetIp += splits(0)
-        }
-        line = bufferedReader.readLine()
-      }
-      getRuntimeContext.addAccumulator("Message Receive", ReceiveMessage)
-      getRuntimeContext.addAccumulator("Message Filter Success", FilterSuccessMessage)
-      getRuntimeContext.addAccumulator("Message Filter Fail", FilterFailMessage)
-
-
-    }
-
-    override def filter(value: QuintetModel): Boolean = {
-      val sourceIp = value.sourceIp
-      val sourcePort = value.sourcePort
-      val destIp = value.destinationIp
-      val destPort = value.destinationPort
-      val sourceBool = innerIpVerdict(sourceIp, innerNetIp, specialIp)
-      val destBool = innerIpVerdict(destIp, innerNetIp, specialIp)
-      val sourcePortBool = portWhiteList.contains(sourcePort)
-      val destPortBool = portWhiteList.contains(destPort)
-      ReceiveMessage.add(1)
-      if (sourceBool && !sourcePortBool && !destPortBool) {
-        if (destBool) {
-          FilterFailMessage.add(1)
-          false
-        } else {
-          FilterSuccessMessage.add(1)
-          true
-        }
-      } else {
-        FilterFailMessage.add(1)
-        false
-      }
-    }
 
   }
 
@@ -254,8 +189,64 @@ object ActiveOutreachWarn {
 
 
   class ActiveOutreachProcessFunction extends ProcessFunction[QuintetModel, (Object, Boolean)] {
+    var portWhiteList = ""
+    var ipWhiteListPlath = ""
+    var officePlaceListPlath = ""
+    var specialIp = ""
+    var innerNetIp = new mutable.HashSet[String]()
+    var officePlaceIp = new mutable.HashSet[String]()
+
+    override def open(parameters: Configuration): Unit = {
+      val globConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
+      portWhiteList = globConf.getString(Constants.ACTIVE_OUTREACH_ANALYZE_PORT_WHITE_LIST, "")
+      ipWhiteListPlath = globConf.getString(Constants.ACTIVE_OUTREACH_ANALYZE_IP_WHITE_LIST, "")
+      officePlaceListPlath = globConf.getString(Constants.ACTIVE_OUTREACH_ANALYZE_OFFICE_IP, "")
+      specialIp = globConf.getString(Constants.ACTIVE_OUTREACH_ANALYZE_SPECIAL_IP, "")
+
+      val systemType = globConf.getString(Constants.FILE_SYSTEM_TYPE, "")
+      val fs = FileSystem.get(URI.create(systemType), new org.apache.hadoop.conf.Configuration())
+
+      val fsDataInputStream = fs.open(new Path(ipWhiteListPlath))
+      val bufferedReader = new BufferedReader(new InputStreamReader(fsDataInputStream))
+      //本地测试
+      //      val stream = new FileReader(new File(""))
+      //      val bufferedReader = new BufferedReader(stream)
+      var line: String = bufferedReader.readLine()
+      while (line != null) {
+        val splits = line.split("\\|", -1)
+        if (splits.length > 1) {
+          innerNetIp += splits(0)
+        }
+        line = bufferedReader.readLine()
+      }
+
+      val officePlaceDataInputStream = fs.open(new Path(officePlaceListPlath))
+      val officePlaceBR = new BufferedReader(new InputStreamReader(officePlaceDataInputStream))
+
+      var officeLine: String = officePlaceBR.readLine()
+      while (officeLine != null) {
+        val splits = officeLine.split("\\|", -1)
+        if (splits.length > 1) {
+          officePlaceIp += splits(0)
+        }
+        officeLine = officePlaceBR.readLine()
+      }
+
+
+    }
+
     override def processElement(value: QuintetModel, ctx: ProcessFunction[QuintetModel, (Object, Boolean)]#Context,
                                 out: Collector[(Object, Boolean)]): Unit = {
+      val sourceIp = value.sourceIp
+      val sourcePort = value.sourcePort
+      val destIp = value.destinationIp
+      val destPort = value.destinationPort
+      val innerSourceBool = innerIpVerdict(sourceIp, innerNetIp, specialIp)
+      val innerDestBool = innerIpVerdict(destIp, innerNetIp, specialIp)
+      val officeSourceBool = innerIpVerdict(sourceIp, officePlaceIp, specialIp)
+      val officeDestBool = innerIpVerdict(destIp, officePlaceIp, specialIp)
+      val sourcePortBool = portWhiteList.contains(sourcePort)
+      val destPortBool = portWhiteList.contains(destPort)
       val entity = new ActiveOutreachWarnEntity
       entity.setAlertTime(new Timestamp(value.timeStamp))
       entity.setDestinationIp(value.destinationIp)
@@ -263,7 +254,16 @@ object ActiveOutreachWarn {
       entity.setSourceIp(value.sourceIp)
       entity.setSourcePort(value.sourcePort)
       entity.setOutPutOctets(value.outputOctets)
-      out.collect(entity, true)
+      if (innerSourceBool && !sourcePortBool && !destPortBool && !officeDestBool && !innerDestBool) {
+        entity.setIsOffice(0)
+
+        out.collect(entity, true)
+      }
+      if (officeSourceBool && !sourcePortBool && !destPortBool && !officeDestBool && !innerDestBool) {
+        entity.setIsOffice(1)
+        out.collect(entity, true)
+
+      }
     }
   }
 

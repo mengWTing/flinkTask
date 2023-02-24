@@ -23,6 +23,7 @@ public class ActiveOutreachWarnEntity {
     private String destinationPort;
     private Long outPutOctets;
     private Timestamp alertTime;
+    private Integer isOffice;
 
     @Basic
     @Column(name = "SOURCE_IP")
@@ -100,5 +101,15 @@ public class ActiveOutreachWarnEntity {
     @Override
     public int hashCode() {
         return Objects.hash(sourceIp, sourcePort, destinationIp, destinationPort, outPutOctets, alertTime);
+    }
+
+    @Basic
+    @Column(name = "IS_OFFICE")
+    public Integer getIsOffice() {
+        return isOffice;
+    }
+
+    public void setIsOffice(Integer isOffice) {
+        this.isOffice = isOffice;
     }
 }

@@ -1,9 +1,6 @@
-package cn.ffcs.is.mss.analyzer.flink.temp.utils;
+package cn.ffcs.is.mss.analyzer.flink.webbuganalyse.utils;
 
 import org.apache.commons.lang.StringUtils;
-
-import java.io.IOException;
-import java.sql.SQLException;
 
 /**
  * @author hanyu

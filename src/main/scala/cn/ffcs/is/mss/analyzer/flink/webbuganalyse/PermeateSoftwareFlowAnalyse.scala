@@ -1,8 +1,8 @@
-package cn.ffcs.is.mss.analyzer.flink.temp
+package cn.ffcs.is.mss.analyzer.flink.webbuganalyse
 
 import cn.ffcs.is.mss.analyzer.bean.PermeateSoftwareFlowWarnEntity
 import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
-import cn.ffcs.is.mss.analyzer.flink.temp.utils.EnglishOrCode
+import cn.ffcs.is.mss.analyzer.flink.webbuganalyse.utils.EnglishOrCode
 import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties, JsonUtil, KeLaiTimeUtils}
 import org.apache.flink.api.common.functions.{RichFlatMapFunction, RichMapFunction}
 import org.apache.flink.configuration.Configuration
@@ -46,13 +46,13 @@ object PermeateSoftwareFlowAnalyse {
 
     //Source的并行度
     val sourceParallelism = confProperties.getIntValue(Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_CONFIG,
-      Constants.OPERATION_KELAI_KAFKA_SOURCE_PARALLELISM)
+      Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_SOURCE_PARALLELISM)
     //算子并行度
     val dealParallelism = confProperties.getIntValue(Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_CONFIG, Constants
       .PERMEATE_SOFTWARE_FLOW_ANALYSE_DEAL_PARALLELISM)
     //Sink的并行度
     val sinkParallelism = confProperties.getIntValue(Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_CONFIG,
-      Constants.OPERATION_KELAI_KAFKA_SINK_PARALLELISM)
+      Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_SINK_PARALLELISM)
 
     //kafka Source的topic
     val topic = confProperties.getValue(Constants.OPERATION_KELAI_FLINK_TO_KAFKA_CONFIG, Constants
@@ -89,7 +89,9 @@ object PermeateSoftwareFlowAnalyse {
     //cookie
     parameters.setString(Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_COOKIE_ICE, confProperties.getValue(
       Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_CONFIG, Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_COOKIE_ICE))
-
+    //regex
+    parameters.setString(Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_URL_REGEX, confProperties.getValue(
+      Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_CONFIG, Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_URL_REGEX))
     //设置kafka消费者相关配置
     val props = new Properties()
     //设置kafka集群地址
@@ -246,26 +248,32 @@ object PermeateSoftwareFlowAnalyse {
       if (isXffAlert._1) {
         entity.setAlertType("XFF注入攻击")
         entity.setAlertXff(isXffAlert._2)
+        out.collect(entity, true)
       } else if (urlIsJavaCode._1) {
         entity.setAlertType("struts2远程代码注入")
         entity.setAlertUrl(urlIsJavaCode._2)
+        out.collect(entity, true)
       } else if (isGodzilla._1) {
         entity.setAlertType("疑似哥斯拉软件渗透")
         entity.setAlertCookie(isGodzilla._2)
         entity.setAlertAccept(isGodzilla._3)
+        out.collect(entity, true)
       } else if (isIceScorpion._1) {
         entity.setAlertType("疑似冰蝎软件渗透")
         entity.setAlertUseragent(isIceScorpion._2)
         entity.setAlertAccept(isIceScorpion._3)
         entity.setAlertCookie(isIceScorpion._6)
+        out.collect(entity, true)
       } else if (isUrlWebShell._1) {
         entity.setAlertType("Web-Shell")
         entity.setAlertUrl(isUrlWebShell._2)
+        out.collect(entity, true)
       } else if (isShiroLeak._1) {
         entity.setAlertType("Shiro漏洞利用")
         entity.setAlertCookie(isShiroLeak._2)
+        out.collect(entity, true)
       }
-      out.collect(entity, true)
+
     }
 
     def getIsShiroLeak(cookieSet: mutable.HashSet[String]): (Boolean, String) = {
@@ -341,7 +349,6 @@ object PermeateSoftwareFlowAnalyse {
           cookieTrait = (true, cookie)
         }
       }
-1
 
       for (i <- acceptSet) {
         if (i.replaceAll(" ", "").contains(accept)) {

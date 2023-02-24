@@ -1,4 +1,4 @@
-package cn.ffcs.is.mss.analyzer.flink.temp.utils;
+package cn.ffcs.is.mss.analyzer.flink.webbuganalyse.utils;
 
 import java.util.LinkedList;
 import java.util.regex.Matcher;

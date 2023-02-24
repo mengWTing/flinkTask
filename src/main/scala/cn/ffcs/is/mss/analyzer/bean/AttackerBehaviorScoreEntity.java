@@ -15,7 +15,7 @@ import java.util.Objects;
  * @update [no][date YYYY-MM-DD][name][description]
  **/
 @Entity
-@Table(name = "attacker_behavior_score", schema = "bigdata", catalog = "")
+@Table(name = "attacker_behavior_score", schema = "SDFS", catalog = "")
 public class AttackerBehaviorScoreEntity {
     private Timestamp attackerTiame;
     private String attackerUsername;
