@@ -3,22 +3,22 @@ package cn.ffcs.is.mss.analyzer.flink.warn
 import java.io.{BufferedReader, InputStreamReader}
 import java.net.URI
 import java.sql.Timestamp
+import java.time.Duration
 import java.util.Properties
+
 import cn.ffcs.is.mss.analyzer.bean.OaSystemCrawlerWarningEntity
-import cn.ffcs.is.mss.analyzer.druid.model.scala.OperationModel
-import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
-import cn.ffcs.is.mss.analyzer.utils.GetInputKafkaValue.getInputKafkaValue
+import cn.ffcs.is.mss.analyzer.flink.sink.{MySQLSink, Sink}
+import cn.ffcs.is.mss.analyzer.flink.source.Source
 import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties, JsonUtil}
 import org.apache.flink.api.common.accumulators.LongCounter
-import org.apache.flink.api.common.functions.{RichFilterFunction, RichMapFunction}
+import org.apache.flink.api.common.eventtime.{SerializableTimestampAssigner, WatermarkStrategy}
+import org.apache.flink.api.common.functions.RichMapFunction
 import org.apache.flink.api.common.state.{ValueState, ValueStateDescriptor}
-import org.apache.flink.configuration.Configuration
-import org.apache.flink.streaming.api.functions.{AssignerWithPunctuatedWatermarks, ProcessFunction}
+import org.apache.flink.configuration.{ConfigOptions, Configuration}
+import org.apache.flink.streaming.api.functions.{KeyedProcessFunction, ProcessFunction}
 import org.apache.flink.streaming.api.scala.{StreamExecutionEnvironment, _}
-import org.apache.flink.streaming.api.watermark.Watermark
+import org.apache.flink.streaming.api.windowing.assigners.SlidingProcessingTimeWindows
 import org.apache.flink.streaming.api.windowing.time.Time
-import org.apache.flink.streaming.connectors.kafka.{FlinkKafkaConsumer, FlinkKafkaProducer}
-import org.apache.flink.streaming.util.serialization.SimpleStringSchema
 import org.apache.flink.util.Collector
 import org.apache.hadoop.fs.{FileSystem, Path}
 
@@ -107,25 +107,20 @@ object OaSystemCrawlerWarn {
     val checkpointInterval = confProperties.getLongValue(Constants
       .OA_SYSTEM_CRAWLER_WARN_CONFIG, Constants.OA_SYSTEM_CRAWLER_WARN_CHECKPOINT_INTERVAL)
 
-    //设置kafka消费者相关配置
-    val props = new Properties()
-    //设置kafka集群地址
-    props.setProperty("bootstrap.servers", brokerList)
-    //设置flink消费的group.id
-    props.setProperty("group.id", groupId)
     //获取kafka消费者
-    val consumer = new FlinkKafkaConsumer[String](sourceTopic, new SimpleStringSchema, props)
-      .setStartFromLatest()
+    val consumer = Source.kafkaSource(sourceTopic, groupId, brokerList)
     //获取kafka 生产者
-    val producer = new FlinkKafkaProducer[String](brokerList, sinkTopic, new SimpleStringSchema())
-
+    val producer = Sink.kafkaSink(brokerList, sinkTopic)
     //获取ExecutionEnvironment
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     //设置checkpoint
     //env.enableCheckpointing(checkpointInterval)
     env.getConfig.setGlobalJobParameters(parameters)
+    env.getConfig.setAutoWatermarkInterval(0)
+
     //获取Kafka数据流
-    val dataStream = env.addSource(consumer).setParallelism(sourceParallelism)
+    val dataStream = env.fromSource(consumer, WatermarkStrategy.noWatermarks(), "kafkaSource").setParallelism(sourceParallelism)
+
     //过滤出访问OA的公文及通讯录的数据
     val oaSystemWarnStream = dataStream.filter(t => {
       var flag = true
@@ -135,17 +130,14 @@ object OaSystemCrawlerWarn {
       }
       flag
     }).setParallelism(dealParallelism)
-      .assignTimestampsAndWatermarks(new AssignerWithPunctuatedWatermarks[String] {
-        override def checkAndGetNextWatermark(lastElement: String, extractedTimestamp: Long):
-        Watermark = {
-          new Watermark(extractedTimestamp - 10000)
-        }
-
-        override def extractTimestamp(element: String,
-                                      previousElementTimestamp: Long): Long = {
-          element.split("\\|", -1)(10).trim.toLong
-        }
-      }).setParallelism(dealParallelism)
+      .assignTimestampsAndWatermarks(
+        WatermarkStrategy.forBoundedOutOfOrderness[String](Duration.ofSeconds(10))
+          .withTimestampAssigner(new SerializableTimestampAssigner[String] {
+            override def extractTimestamp(element: String, recordTimestamp: Long): Long = {
+                element.split("\\|", -1)(10).trim.toLong
+            }
+          })
+      )
 
     val timeValue = oaSystemWarnStream
       .map(new RichMapFunction[String, (String, Long, mutable.HashSet[String],
@@ -202,7 +194,7 @@ object OaSystemCrawlerWarn {
       }
     }).setParallelism(dealParallelism)
       .keyBy(_._1)
-      .timeWindow(Time.minutes(30), Time.minutes(30))
+      .window(SlidingProcessingTimeWindows.of(Time.minutes(30), Time.minutes(30)))
       .reduce((t1, t2) => {
         (t1._1, t1._2.++(t2._2), t1._3.++(t2._3), t1._4.++(t2._4), t1._5.++(t2._5))
       })
@@ -217,31 +209,28 @@ object OaSystemCrawlerWarn {
       .map(o => {
         JsonUtil.toJson(o._1._1.asInstanceOf[OaSystemCrawlerWarningEntity])
       })
-      .addSink(producer)
+      .sinkTo(producer)
       .setParallelism(1)
 
     urlValue
       .map(o => {
         JsonUtil.toJson(o._1._1.asInstanceOf[OaSystemCrawlerWarningEntity])
       })
-      .addSink(producer)
+      .sinkTo(producer)
       .setParallelism(1)
 
 
     //将告警数据写入告警库topic
-    val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
-        SimpleStringSchema())
+    val warningProducer = Sink.kafkaSink(brokerList, warningSinkTopic)
+    timeAlertKafkaValue.sinkTo(warningProducer).setParallelism(sinkParallelism)
 
-    timeAlertKafkaValue.addSink(warningProducer).setParallelism(sinkParallelism)
-
-    urlAlertKafkaValue.addSink(warningProducer).setParallelism(sinkParallelism)
+    urlAlertKafkaValue.sinkTo(warningProducer).setParallelism(sinkParallelism)
 
 
     env.execute(jobName)
   }
 
-  //  class OaSystemCrawlerWarnProcessFuncation extends ProcessFunction[(OperationModel, String), (Object, Boolean)] {
-  class OaSystemCrawlerWarnProcessFuncation extends ProcessFunction[(String, Long, mutable.HashSet[String],
+  class OaSystemCrawlerWarnProcessFuncation extends KeyedProcessFunction[String, (String, Long, mutable.HashSet[String],
     mutable.HashSet[String], mutable.HashSet[String]), ((Object, Boolean), String)] {
     //记录这一用户的srcIp
     lazy val srcIp: ValueState[collection.mutable.HashSet[String]] = getRuntimeContext
@@ -275,14 +264,14 @@ object OaSystemCrawlerWarn {
       getRuntimeContext.addAccumulator("DetectCrawlerFunction: Messages send by time", messagesSend)
       //全局配置
       val globalConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
-      allowTime = globalConf.getLong(Constants.OA_SYSTEM_CRAWLER_WARN_ONLINE_TIME_ALLOW, 0L)
-      decideTime = globalConf.getLong(Constants.OA_SYSTEM_CRAWLER_WARN_ONLINE_TIME_DECIDE, 0L)
-      OaUrl = globalConf.getString(Constants.OA_SYSTEM_CRAWLER_WARN_OFFICIAL_URL, "")
-      AddressUrl = globalConf.getString(Constants.OA_SYSTEM_CRAWLER_WARN_ADDRESS_URL, "")
-      countAllow = globalConf.getInteger(Constants.OA_SYSTEM_CRAWLER_WARN_COUNT_ALLOW, 0)
-      opPath = globalConf.getString(Constants.OPERATION_PERSONNEL_DOWNLOAD_OPERATION_PERSONNEL_PATH_OA, "")
+      allowTime = globalConf.getLong(ConfigOptions.key(Constants.OA_SYSTEM_CRAWLER_WARN_ONLINE_TIME_ALLOW).longType().defaultValue(0L))
+      decideTime = globalConf.getLong(ConfigOptions.key(Constants.OA_SYSTEM_CRAWLER_WARN_ONLINE_TIME_DECIDE).longType().defaultValue(0L))
+      OaUrl = globalConf.getString(ConfigOptions.key(Constants.OA_SYSTEM_CRAWLER_WARN_OFFICIAL_URL).stringType().defaultValue(""))
+      AddressUrl = globalConf.getString(ConfigOptions.key(Constants.OA_SYSTEM_CRAWLER_WARN_ADDRESS_URL).stringType().defaultValue(""))
+      countAllow = globalConf.getInteger(ConfigOptions.key(Constants.OA_SYSTEM_CRAWLER_WARN_COUNT_ALLOW).intType().defaultValue(0))
+      opPath = globalConf.getString(ConfigOptions.key(Constants.OPERATION_PERSONNEL_DOWNLOAD_OPERATION_PERSONNEL_PATH_OA).stringType().defaultValue(""))
 
-      val systemType = globalConf.getString(Constants.FILE_SYSTEM_TYPE, "")
+      val systemType = globalConf.getString(ConfigOptions.key(Constants.FILE_SYSTEM_TYPE).stringType().defaultValue(""))
       val fs = FileSystem.get(URI.create(systemType), new org.apache.hadoop.conf.Configuration())
       val fsDataInputStream = fs.open(new Path(opPath))
       val bufferedReader = new BufferedReader(new InputStreamReader(fsDataInputStream))
@@ -303,7 +292,7 @@ object OaSystemCrawlerWarn {
 
     }
 
-    override def onTimer(timestamp: Long, ctx: ProcessFunction[(String, Long, mutable.HashSet[String],
+    override def onTimer(timestamp: Long, ctx: KeyedProcessFunction[String, (String, Long, mutable.HashSet[String],
       mutable.HashSet[String], mutable.HashSet[String]), ((Object, Boolean), String)]#OnTimerContext,
                          out: Collector[((Object, Boolean), String)]): Unit = {
 
@@ -319,10 +308,9 @@ object OaSystemCrawlerWarn {
       }
     }
 
-
     override def processElement(i: (String, Long, mutable.HashSet[String],
       mutable.HashSet[String], mutable.HashSet[String]),
-                                ctx: ProcessFunction[(String, Long, mutable.HashSet[String],
+                                ctx: KeyedProcessFunction[String, (String, Long, mutable.HashSet[String],
                                   mutable.HashSet[String], mutable.HashSet[String]), ((Object, Boolean), String)]#Context,
                                 out: Collector[((Object, Boolean), String)]): Unit = {
       messagesReceived.add(1)
@@ -444,14 +432,15 @@ object OaSystemCrawlerWarn {
       getRuntimeContext.addAccumulator("DetectCrawlerFunction: Messages send by url", messagesSend)
       //全局配置
       val globalConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
-      allowTime = globalConf.getLong(Constants.OA_SYSTEM_CRAWLER_WARN_ONLINE_TIME_ALLOW, 0L)
-      decideTime = globalConf.getLong(Constants.OA_SYSTEM_CRAWLER_WARN_ONLINE_TIME_DECIDE, 0L)
-      OaUrl = globalConf.getString(Constants.OA_SYSTEM_CRAWLER_WARN_OFFICIAL_URL, "")
-      AddressUrl = globalConf.getString(Constants.OA_SYSTEM_CRAWLER_WARN_ADDRESS_URL, "")
-      countAllow = globalConf.getInteger(Constants.OA_SYSTEM_CRAWLER_WARN_COUNT_ALLOW, 0)
-      opPath = globalConf.getString(Constants.OPERATION_PERSONNEL_DOWNLOAD_OPERATION_PERSONNEL_PATH_OA, "")
 
-      val systemType = globalConf.getString(Constants.FILE_SYSTEM_TYPE, "")
+      allowTime = globalConf.getLong(ConfigOptions.key(Constants.OA_SYSTEM_CRAWLER_WARN_ONLINE_TIME_ALLOW).longType().defaultValue(0L))
+      decideTime = globalConf.getLong(ConfigOptions.key(Constants.OA_SYSTEM_CRAWLER_WARN_ONLINE_TIME_DECIDE).longType().defaultValue(0L))
+      OaUrl = globalConf.getString(ConfigOptions.key(Constants.OA_SYSTEM_CRAWLER_WARN_OFFICIAL_URL).stringType().defaultValue(""))
+      AddressUrl = globalConf.getString(ConfigOptions.key(Constants.OA_SYSTEM_CRAWLER_WARN_ADDRESS_URL).stringType().defaultValue(""))
+      countAllow = globalConf.getInteger(ConfigOptions.key(Constants.OA_SYSTEM_CRAWLER_WARN_COUNT_ALLOW).intType().defaultValue(0))
+      opPath = globalConf.getString(ConfigOptions.key(Constants.OPERATION_PERSONNEL_DOWNLOAD_OPERATION_PERSONNEL_PATH_OA).stringType().defaultValue(""))
+
+      val systemType = globalConf.getString(ConfigOptions.key(Constants.FILE_SYSTEM_TYPE).stringType().defaultValue(""))
       val fs = FileSystem.get(URI.create(systemType), new org.apache.hadoop.conf.Configuration())
       val fsDataInputStream = fs.open(new Path(opPath))
       val bufferedReader = new BufferedReader(new InputStreamReader(fsDataInputStream))

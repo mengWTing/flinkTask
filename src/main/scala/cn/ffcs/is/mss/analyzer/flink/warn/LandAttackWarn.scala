@@ -2,16 +2,16 @@ package cn.ffcs.is.mss.analyzer.flink.warn
 
 import java.sql.Timestamp
 import java.util.Properties
-import cn.ffcs.is.mss.analyzer.bean.{ActiveOutreachWarnEntity, DdosWarnEntity}
+
+import cn.ffcs.is.mss.analyzer.bean.DdosWarnEntity
 import cn.ffcs.is.mss.analyzer.druid.model.scala.QuintetModel
-import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
+import cn.ffcs.is.mss.analyzer.flink.sink.{MySQLSink, Sink}
+import cn.ffcs.is.mss.analyzer.flink.source.Source
 import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties, JsonUtil}
+import org.apache.flink.api.common.eventtime.WatermarkStrategy
 import org.apache.flink.configuration.Configuration
-import org.apache.flink.streaming.api.TimeCharacteristic
 import org.apache.flink.streaming.api.functions.ProcessFunction
 import org.apache.flink.streaming.api.scala.StreamExecutionEnvironment
-import org.apache.flink.streaming.connectors.kafka.{FlinkKafkaConsumer, FlinkKafkaProducer}
-import org.apache.flink.streaming.util.serialization.SimpleStringSchema
 import org.apache.flink.util.Collector
 import org.apache.flink.streaming.api.scala._
 
@@ -79,24 +79,13 @@ object LandAttackWarn {
       .c3p0_CONFIG_PATH))
 
     val env = StreamExecutionEnvironment.getExecutionEnvironment
-    env.enableCheckpointing(checkpointInterval)
-    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
+//    env.enableCheckpointing(checkpointInterval)
     env.getConfig.setGlobalJobParameters(parameters)
 
-
-    //设置kafka消费者相关配置
-    val props = new Properties()
-    //设置kafka集群地址
-    props.setProperty("bootstrap.servers", brokerList)
-    //设置flink消费的group.id
-    props.setProperty("group.id", groupId)
-
     //获取kafka消费者
-    val consumer = new FlinkKafkaConsumer[String](kafkaSourceTopic, new SimpleStringSchema, props)
-      .setStartFromGroupOffsets()
+    val consumer = Source.kafkaSource(kafkaSourceTopic, groupId, brokerList)
 
-
-    val alertData = env.addSource(consumer).setParallelism(kafkaSourceParallelism)
+    val alertData = env.fromSource(consumer, WatermarkStrategy.noWatermarks(), kafkaSourceName).setParallelism(kafkaSourceParallelism)
       .uid(kafkaSourceName).name(kafkaSourceName)
       .map(JsonUtil.fromJson[QuintetModel] _).setParallelism(dealParallelism)
       .filter(model => {
@@ -112,19 +101,18 @@ object LandAttackWarn {
       .setParallelism(sqlSinkParallelism)
 
     //获取kafka生产者
-    val producer = new FlinkKafkaProducer[String](brokerList, kafkaSinkTopic, new SimpleStringSchema())
+    val producer = Sink.kafkaSink(brokerList, kafkaSinkTopic)
     alertData.map(m => {
       JsonUtil.toJson(m._1._1.asInstanceOf[DdosWarnEntity])
     })
-      .addSink(producer)
+      .sinkTo(producer)
       .uid(kafkaSinkName)
       .name(kafkaSinkName)
       .setParallelism(kafkaSinkParallelism)
 
     //将告警数据写入告警库topic
-    val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
-        SimpleStringSchema())
-    alertKafkaValue.addSink(warningProducer).setParallelism(kafkaSinkParallelism)
+    val warningProducer = Sink.kafkaSink(brokerList, warningSinkTopic)
+    alertKafkaValue.sinkTo(warningProducer).setParallelism(kafkaSinkParallelism)
 
 
     env.execute(jobName)

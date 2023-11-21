@@ -8,11 +8,11 @@ import java.util.Properties
 import cn.ffcs.is.mss.analyzer.bean.BbasUsedPlaceWarnEntity
 import cn.ffcs.is.mss.analyzer.druid.model.scala.OperationModel
 import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
+import cn.ffcs.is.mss.analyzer.flink.source.Source
 import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties, JsonUtil}
+import org.apache.flink.api.common.eventtime.WatermarkStrategy
 import org.apache.flink.api.common.functions.RichMapFunction
-import org.apache.flink.api.common.serialization.SimpleStringSchema
-import org.apache.flink.configuration.Configuration
-import org.apache.flink.streaming.api.TimeCharacteristic
+import org.apache.flink.configuration.{ConfigOptions, Configuration}
 import org.apache.flink.streaming.api.scala._
 import org.apache.flink.streaming.connectors.kafka.FlinkKafkaConsumer
 import org.apache.hadoop.fs.{FileSystem, Path}
@@ -74,23 +74,15 @@ object UsedPlaceWarn {
     //获取ExecutionEnvironment
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     //设置check pointing的间隔
-    env.enableCheckpointing(checkpointInterval)
+//    env.enableCheckpointing(checkpointInterval)
     //设置流的时间为EventTime
-    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
     //设置flink全局变量
     env.getConfig.setGlobalJobParameters(parameters)
 
-    //设置kafka消费者相关配置
-    val props = new Properties()
-    //设置kafka集群地址
-    props.setProperty("bootstrap.servers", brokerList)
-    //设置flink消费的group.id
-    props.setProperty("group.id", groupId)
-
     //获取kafka消费者
-    val consumer = new FlinkKafkaConsumer[String](topic, new SimpleStringSchema, props).setStartFromGroupOffsets()
+    val consumer = Source.kafkaSource(topic, groupId, brokerList)
     // 获取kafka数据
-    val dStream = env.addSource(consumer).setParallelism(kafkaSourceParallelism)
+    val dStream = env.fromSource(consumer, WatermarkStrategy.noWatermarks(), kafkaSourceName).setParallelism(kafkaSourceParallelism)
       .uid(kafkaSourceName).name(kafkaSourceName)
 //    var path = "/Users/chenwei/Downloads/mss.1525735052963.txt"
 //    path = "/Users/chenwei/Downloads/14021053@HQ/14021053@HQ.txt"
@@ -131,10 +123,9 @@ object UsedPlaceWarn {
           val globConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
 
           //类描述文件路径
-          val clusterDescribePath = globConf.getString(Constants.USED_PLACE_CLUSTER_DESCRIBE_PATH,"")
+          val clusterDescribePath = globConf.getString(ConfigOptions.key(Constants.USED_PLACE_CLUSTER_DESCRIBE_PATH).stringType().defaultValue(""))
           //用户名对应的类id文件
-          val clusterIdPath = globConf.getString(Constants.USED_PLACE_CLUSTER_ID_PATH,"")
-
+          val clusterIdPath = globConf.getString(ConfigOptions.key(Constants.USED_PLACE_CLUSTER_ID_PATH).stringType().defaultValue(""))
           val clusterDescribeFileSystem = FileSystem.get(URI.create(clusterDescribePath), new org.apache.hadoop.conf.Configuration())
           val clusterDescribeFsDataInputStream = clusterDescribeFileSystem.open(new Path(clusterDescribePath))
           val clusterDescribeBufferedReader = new BufferedReader(new InputStreamReader(clusterDescribeFsDataInputStream))

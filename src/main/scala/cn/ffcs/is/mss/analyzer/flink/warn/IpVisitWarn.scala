@@ -3,17 +3,20 @@ package cn.ffcs.is.mss.analyzer.flink.warn
 import java.io._
 import java.net.URI
 import java.sql.Timestamp
+import java.time.Duration
 import java.util.Properties
 
 import cn.ffcs.is.mss.analyzer.bean.{AlarmRulesEntity, IpVisitWarnMergeEntity, IpasIpVisitWarnEntity}
 import cn.ffcs.is.mss.analyzer.druid.model.scala.QuintetModel
-import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
+import cn.ffcs.is.mss.analyzer.flink.sink.{MySQLSink, Sink}
+import cn.ffcs.is.mss.analyzer.flink.source.Source
 import cn.ffcs.is.mss.analyzer.ml.iforest.IForest
+import cn.ffcs.is.mss.analyzer.utils
 import cn.ffcs.is.mss.analyzer.utils._
 import cn.ffcs.is.mss.analyzer.utils.druid.entity._
 import javax.persistence.Table
 import org.apache.flink.api.common.functions.{RichFlatMapFunction, RichMapFunction}
-import org.apache.flink.configuration.Configuration
+import org.apache.flink.configuration.{ConfigOptions, Configuration}
 import org.apache.flink.streaming.api.TimeCharacteristic
 import org.apache.flink.streaming.api.functions.{AssignerWithPunctuatedWatermarks, ProcessFunction}
 import org.apache.flink.streaming.api.scala._
@@ -24,6 +27,8 @@ import org.apache.flink.streaming.util.serialization.SimpleStringSchema
 import org.apache.flink.util.Collector
 import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.flink.api.common.accumulators.LongCounter
+import org.apache.flink.api.common.eventtime.{SerializableTimestampAssigner, WatermarkStrategy}
+import org.apache.flink.streaming.api.windowing.assigners.SlidingEventTimeWindows
 import org.json.{JSONArray, JSONObject}
 
 import scala.collection.JavaConversions._
@@ -142,33 +147,22 @@ object IpVisitWarn {
     val warningSinkTopic = confProperties.getValue(Constants.WARNING_FLINK_TO_DRUID_CONFIG, Constants
       .WARNING_TOPIC)
 
-    //设置kafka消费者相关配置
-    val props = new Properties()
-    //设置kafka集群地址
-    props.setProperty("bootstrap.servers", brokerList)
-    //设置flink消费的group.id
-    props.setProperty("group.id", groupId + "test")
-
     //获取kafka消费者
-    val consumer = new FlinkKafkaConsumer[String](topic, new SimpleStringSchema, props)
-      .setStartFromLatest()
+    val consumer = Source.kafkaSource(topic, groupId, brokerList)
     //获取kafka 生产者
-    val producer = new FlinkKafkaProducer[String](brokerList, kafkaSinkTopic, new
-        SimpleStringSchema())
+    val producer = Sink.kafkaSink(brokerList, kafkaSinkTopic)
 
     //获取ExecutionEnvironment
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     //设置check pointing的间隔
-    env.enableCheckpointing(checkpointInterval)
-    //设置流的时间为EventTime
-    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
+//    env.enableCheckpointing(checkpointInterval)
     //设置flink全局变量
     env.getConfig.setGlobalJobParameters(parameters)
 
 
     //获取kafka数据
-    val dStream = env.addSource(consumer).setParallelism(kafkaSourceParallelism)
-      .uid(kafkaSourceName).name(kafkaSourceName)
+    val dStream = env.fromSource(consumer, WatermarkStrategy.noWatermarks(), kafkaSourceName).setParallelism(kafkaSourceParallelism)
+    .uid(kafkaSourceName).name(kafkaSourceName)
 
     //val path = "/Users/chenwei/Downloads/mss.1528437418083.txt"
     //val dStream = env.readTextFile(path, "iso-8859-1")
@@ -207,18 +201,16 @@ object IpVisitWarn {
       .map(tuple => (tuple.timeStamp.toLong / TimeUtil.MINUTE_MILLISECOND * TimeUtil
         .MINUTE_MILLISECOND,
         tuple.destinationIp, tuple.destinationPort, Set[String](tuple.sourceIp))).setParallelism(dealParallelism)
-      .assignTimestampsAndWatermarks(new AssignerWithPunctuatedWatermarks[(Long, String, String,
-        Set[String])] {
-        override def checkAndGetNextWatermark(lastElement: (Long, String, String, Set[String]),
-                                              extractedTimestamp: Long): Watermark =
-          new Watermark(extractedTimestamp - 10000)
-
-        override def extractTimestamp(element: (Long, String, String, Set[String]),
-                                      previousElementTimestamp: Long): Long =
-          element._1
-      }).setParallelism(dealParallelism)
-      .keyBy(1, 2)
-      .timeWindow(Time.minutes(1), Time.minutes(1))
+      .assignTimestampsAndWatermarks(
+        WatermarkStrategy.forBoundedOutOfOrderness[(Long, String, String, Set[String])](Duration.ofSeconds(10))
+          .withTimestampAssigner(new SerializableTimestampAssigner[(Long, String, String, Set[String])] {
+            override def extractTimestamp(element: (Long, String, String, Set[String]), recordTimestamp: Long): Long = {
+              element._1
+            }
+          })
+      ).setParallelism(dealParallelism)
+      .keyBy(x=>(x._2,x._3))
+      .window(SlidingEventTimeWindows.of(Time.minutes(1), Time.minutes(1)))
       .reduce((value1, value2) => (value1._1, value1._2, value1._3, value1._4 ++ value2._4))
       .setParallelism(queryParallelism)
       .flatMap(new QueryWarnSourceIpCountRichFlatMapFunction).setParallelism(queryParallelism)
@@ -238,17 +230,15 @@ object IpVisitWarn {
 
     sourceOperationModelStream
       .map(_._1._1.asInstanceOf[IpasIpVisitWarnEntity]).setParallelism(1)
-      .assignTimestampsAndWatermarks(new AssignerWithPunctuatedWatermarks[IpasIpVisitWarnEntity] {
-        override def checkAndGetNextWatermark(lastElement: IpasIpVisitWarnEntity,
-                                              extractedTimestamp: Long): Watermark =
-          new Watermark(extractedTimestamp - 10000)
-
-        override def extractTimestamp(element: IpasIpVisitWarnEntity,
-                                      previousElementTimestamp: Long): Long =
-
-          element.getWarnDate.getTime
-      }).setParallelism(1)
-      .timeWindowAll(Time.minutes(1), Time.minutes(1))
+      .assignTimestampsAndWatermarks(
+        WatermarkStrategy.forBoundedOutOfOrderness[IpasIpVisitWarnEntity](Duration.ofSeconds(10))
+          .withTimestampAssigner(new SerializableTimestampAssigner[IpasIpVisitWarnEntity] {
+            override def extractTimestamp(element: IpasIpVisitWarnEntity, recordTimestamp: Long): Long = {
+              element.getWarnDate.getTime
+            }
+          })
+      ).setParallelism(1)
+      .windowAll(SlidingEventTimeWindows.of(Time.minutes(1), Time.minutes(1)))
       .reduce((o1, o2) => {
         val timeStamp = if (o1.getWarnDate.getTime > o2.getWarnDate.getTime) o1.getWarnDate else
           o2.getWarnDate
@@ -265,14 +255,13 @@ object IpVisitWarn {
       JsonUtil.toJson(o._1._1.asInstanceOf[IpasIpVisitWarnEntity])
     })
 
-      .addSink(producer)
+      .sinkTo(producer)
       .uid(kafkaSinkName)
       .name(kafkaSinkName)
       .setParallelism(kafkaSinkParallelism)
     //将告警数据写入告警库topic
-    val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
-        SimpleStringSchema())
-    sourceOperationModelStream.map(_._2).addSink(warningProducer).setParallelism(kafkaSinkParallelism)
+    val warningProducer = Sink.kafkaSink(brokerList, warningSinkTopic)
+    sourceOperationModelStream.map(_._2).sinkTo(warningProducer).setParallelism(kafkaSinkParallelism)
     env.execute(jobName)
 
   }
@@ -304,21 +293,22 @@ object IpVisitWarn {
 
       val globConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
 
-      DateUtil.ini(globConf.getString(Constants.FILE_SYSTEM_TYPE, ""), globConf.getString(Constants.DATE_CONFIG_PATH, ""))
-      DruidUtil.setDruidHostPortSet(globConf.getString(Constants.DRUID_BROKER_HOST_PORT, ""))
-      DruidUtil.setTimeFormat(globConf.getString(Constants.DRUID_TIME_FORMAT, ""))
-      DruidUtil.setDateStartTimeStamp(globConf.getLong(Constants.DRUID_DATA_START_TIMESTAMP, 0L))
+      DateUtil.ini(globConf.getString(ConfigOptions.key(Constants.FILE_SYSTEM_TYPE).stringType().defaultValue("")),
+        globConf.getString(ConfigOptions.key(Constants.DATE_CONFIG_PATH).stringType().defaultValue("")))
+      DruidUtil.setDruidHostPortSet(globConf.getString(ConfigOptions.key(Constants.DRUID_BROKER_HOST_PORT).stringType().defaultValue("")))
+      DruidUtil.setTimeFormat(globConf.getString(ConfigOptions.key(Constants.DRUID_TIME_FORMAT).stringType().defaultValue("")))
+      DruidUtil.setDateStartTimeStamp(globConf.getLong(ConfigOptions.key(Constants.DRUID_DATA_START_TIMESTAMP).longType().defaultValue(0L)))
 
-      sourceIpCountIntervalTime = globConf.getLong(Constants.IP_VISIT_SOURCE_IP_COUNT_INTERVAL_TIME, 300000L)
-      sourceIpCountNumberOfSubtree = globConf.getInteger(Constants.IP_VISIT_SOURCE_IP_COUNT_NUMBER_OF_SUBTREE, 500)
-      sourceIpCountIters = globConf.getInteger(Constants.IP_VISIT_SOURCE_IP_COUNT_ITERS, 100)
-      sourceIpCountSampleSize = globConf.getInteger(Constants.IP_VISIT_SOURCE_IP_COUNT_SAMPLE_SIZE, 128)
+      sourceIpCountIntervalTime = globConf.getLong(ConfigOptions.key(Constants.IP_VISIT_SOURCE_IP_COUNT_INTERVAL_TIME).longType().defaultValue(300000L))
+      sourceIpCountNumberOfSubtree = globConf.getInteger(ConfigOptions.key(Constants.IP_VISIT_SOURCE_IP_COUNT_NUMBER_OF_SUBTREE).intType().defaultValue(500))
+      sourceIpCountIters = globConf.getInteger(ConfigOptions.key(Constants.IP_VISIT_SOURCE_IP_COUNT_ITERS).intType().defaultValue(100))
+      sourceIpCountSampleSize = globConf.getInteger(ConfigOptions.key(Constants.IP_VISIT_SOURCE_IP_COUNT_SAMPLE_SIZE).intType().defaultValue(128))
+
 
       getRuntimeContext.addAccumulator("SourceIpCountRichFlat:Messages received", messagesReceived)
       getRuntimeContext.addAccumulator("SourceIpCountRichFlat:Messages send", messagesSend)
 
-      tableName = globConf.getString(Constants.DRUID_QUINTET_TABLE_NAME, "")
-
+      tableName = globConf.getString(ConfigOptions.key(Constants.DRUID_QUINTET_TABLE_NAME).stringType().defaultValue(""))
     }
 
     override def flatMap(value: (Long, String, String, Set[String]), out: Collector[(Long, String, String)]): Unit = {
@@ -449,21 +439,21 @@ object IpVisitWarn {
 
       val globConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
 
-      DateUtil.ini(globConf.getString(Constants.FILE_SYSTEM_TYPE, ""), globConf.getString(Constants.DATE_CONFIG_PATH, ""))
-      DruidUtil.setDruidHostPortSet(globConf.getString(Constants.DRUID_BROKER_HOST_PORT, ""))
-      DruidUtil.setTimeFormat(globConf.getString(Constants.DRUID_TIME_FORMAT, ""))
-      DruidUtil.setDateStartTimeStamp(globConf.getLong(Constants.DRUID_DATA_START_TIMESTAMP, 0L))
+      DateUtil.ini(globConf.getString(ConfigOptions.key(Constants.FILE_SYSTEM_TYPE).stringType().defaultValue("")),
+        globConf.getString(ConfigOptions.key(Constants.DATE_CONFIG_PATH).stringType().defaultValue("")))
+      DruidUtil.setDruidHostPortSet(globConf.getString(ConfigOptions.key(Constants.DRUID_BROKER_HOST_PORT).stringType().defaultValue("")))
+      DruidUtil.setTimeFormat(globConf.getString(ConfigOptions.key(Constants.DRUID_TIME_FORMAT).stringType().defaultValue("")))
+      DruidUtil.setDateStartTimeStamp(globConf.getLong(ConfigOptions.key(Constants.DRUID_DATA_START_TIMESTAMP).longType().defaultValue(0L)))
 
-      sourceIpIntervalTime = globConf.getLong(Constants.IP_VISIT_SOURCE_IP_INTERVAL_TIME, 300000L)
-      sourceIpNumberOfSubtree = globConf.getInteger(Constants.IP_VISIT_SOURCE_IP_NUMBER_OF_SUBTREE, 500)
-      sourceIpIters = globConf.getInteger(Constants.IP_VISIT_SOURCE_IP_ITERS, 100)
-      sourceIpSampleSize = globConf.getInteger(Constants.IP_VISIT_SOURCE_IP_SAMPLE_SIZE, 128)
+      sourceIpIntervalTime = globConf.getLong(ConfigOptions.key(Constants.IP_VISIT_SOURCE_IP_INTERVAL_TIME).longType().defaultValue(300000L))
+      sourceIpNumberOfSubtree = globConf.getInteger(ConfigOptions.key(Constants.IP_VISIT_SOURCE_IP_NUMBER_OF_SUBTREE).intType().defaultValue(500))
+      sourceIpIters = globConf.getInteger(ConfigOptions.key(Constants.IP_VISIT_SOURCE_IP_ITERS).intType().defaultValue(100))
+      sourceIpSampleSize = globConf.getInteger(ConfigOptions.key(Constants.IP_VISIT_SOURCE_IP_SAMPLE_SIZE).intType().defaultValue(128))
 
       getRuntimeContext.addAccumulator("SourceRichFlat:Messages received", messagesReceived)
       getRuntimeContext.addAccumulator("SourceRichFlat:Messages send", messagesSend)
 
-      tableName = globConf.getString(Constants.DRUID_QUINTET_TABLE_NAME, "")
-
+      globConf.getString(ConfigOptions.key(Constants.DRUID_QUINTET_TABLE_NAME).stringType().defaultValue(""))
     }
 
     override def flatMap(value: (Long, String, String), out: Collector[(Long, String, String, String, Double)]): Unit = {
@@ -751,16 +741,16 @@ object IpVisitWarn {
       val globConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters
         .asInstanceOf[Configuration]
 
-      DateUtil.ini(globConf.getString(Constants.FILE_SYSTEM_TYPE, ""), globConf.getString
-      (Constants.DATE_CONFIG_PATH, ""))
-      DruidUtil.setDruidHostPortSet(globConf.getString(Constants.DRUID_BROKER_HOST_PORT, ""))
-      DruidUtil.setTimeFormat(globConf.getString(Constants.DRUID_TIME_FORMAT, ""))
-      DruidUtil.setDateStartTimeStamp(globConf.getLong(Constants.DRUID_DATA_START_TIMESTAMP, 0L))
-      druidStartTime = globConf.getLong(Constants.DRUID_DATA_START_TIMESTAMP, 0L)
+      DateUtil.ini(globConf.getString(ConfigOptions.key(Constants.FILE_SYSTEM_TYPE).stringType().defaultValue("")),
+        globConf.getString(ConfigOptions.key(Constants.DATE_CONFIG_PATH).stringType().defaultValue("")))
+      DruidUtil.setDruidHostPortSet(globConf.getString(ConfigOptions.key(Constants.DRUID_BROKER_HOST_PORT).stringType().defaultValue("")))
+      DruidUtil.setTimeFormat(globConf.getString(ConfigOptions.key(Constants.DRUID_TIME_FORMAT).stringType().defaultValue("")))
+      DruidUtil.setDateStartTimeStamp(globConf.getLong(ConfigOptions.key(Constants.DRUID_DATA_START_TIMESTAMP).longType().defaultValue(0L)))
+      druidStartTime = globConf.getLong(ConfigOptions.key(Constants.DRUID_DATA_START_TIMESTAMP).longType().defaultValue(0L))
 
       //根据c3p0配置文件,初始化c3p0连接池
       val c3p0Properties = new Properties()
-      val c3p0ConfigPath = globConf.getString(Constants.c3p0_CONFIG_PATH, "")
+      val c3p0ConfigPath = globConf.getString(ConfigOptions.key(Constants.c3p0_CONFIG_PATH).stringType().defaultValue(""))
       val fs = FileSystem.get(URI.create(c3p0ConfigPath), new org.apache.hadoop.conf
       .Configuration())
       val fsDataInputStream = fs.open(new Path(c3p0ConfigPath))
@@ -819,15 +809,16 @@ object IpVisitWarn {
       //获取全局变量
       val globConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
 
-      DateUtil.ini(globConf.getString(Constants.FILE_SYSTEM_TYPE, ""), globConf.getString(Constants.DATE_CONFIG_PATH, ""))
-      DruidUtil.setDruidHostPortSet(globConf.getString(Constants.DRUID_BROKER_HOST_PORT, ""))
-      DruidUtil.setTimeFormat(globConf.getString(Constants.DRUID_TIME_FORMAT, ""))
-      DruidUtil.setDateStartTimeStamp(globConf.getLong(Constants.DRUID_DATA_START_TIMESTAMP, 0L))
-      druidStartTime = globConf.getLong(Constants.DRUID_DATA_START_TIMESTAMP, 0L)
+      DateUtil.ini(globConf.getString(ConfigOptions.key(Constants.FILE_SYSTEM_TYPE).stringType().defaultValue("")), globConf.getString(ConfigOptions.key(Constants.DATE_CONFIG_PATH).stringType().defaultValue("")))
+      DruidUtil.setDruidHostPortSet(globConf.getString(ConfigOptions.key(Constants.DRUID_BROKER_HOST_PORT).stringType().defaultValue("")))
+      DruidUtil.setTimeFormat(globConf.getString(ConfigOptions.key(Constants.DRUID_TIME_FORMAT).stringType().defaultValue("")))
+      DruidUtil.setDateStartTimeStamp(globConf.getLong(ConfigOptions.key(Constants.DRUID_DATA_START_TIMESTAMP).longType().defaultValue(0L)))
+      druidStartTime = globConf.getLong(ConfigOptions.key(Constants.DRUID_DATA_START_TIMESTAMP).longType().defaultValue(0L))
+
 
       //根据c3p0配置文件,初始化c3p0连接池
       val c3p0Properties = new Properties()
-      val c3p0ConfigPath = globConf.getString(Constants.c3p0_CONFIG_PATH, "")
+      val c3p0ConfigPath = globConf.getString(ConfigOptions.key(Constants.c3p0_CONFIG_PATH).stringType().defaultValue(""))
       val fs = FileSystem.get(URI.create(c3p0ConfigPath), new org.apache.hadoop.conf.Configuration())
       val fsDataInputStream = fs.open(new Path(c3p0ConfigPath))
       val bufferedReader = new BufferedReader(new InputStreamReader(fsDataInputStream))
@@ -838,7 +829,7 @@ object IpVisitWarn {
       //操作数据库的类
       sqlHelper = new SQLHelper()
       DATA_BASE_NAME = sqlHelper.database
-      tableName = globConf.getString(Constants.DRUID_QUINTET_TABLE_NAME, "")
+      tableName = globConf.getString(ConfigOptions.key(Constants.DRUID_QUINTET_TABLE_NAME).stringType().defaultValue(""))
 
       getRuntimeContext.addAccumulator("MergeIpVisitWarn: Messages received", messagesReceived)
       getRuntimeContext.addAccumulator("MergeIpVisitWarn: sqlQuery", sqlQuery)

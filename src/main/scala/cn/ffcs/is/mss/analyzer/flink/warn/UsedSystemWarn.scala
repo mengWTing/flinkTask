@@ -2,29 +2,26 @@ package cn.ffcs.is.mss.analyzer.flink.warn
 
 import java.io.{File, PrintWriter}
 import java.sql.Timestamp
+import java.time.Duration
 import java.util.Properties
 
 import cn.ffcs.is.mss.analyzer.bean.BbasUsedSystemWarnEntity
 import cn.ffcs.is.mss.analyzer.druid.model.scala.OperationModel
 import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
+import cn.ffcs.is.mss.analyzer.flink.source.Source
 import cn.ffcs.is.mss.analyzer.ml.iforest.IForest
-import cn.ffcs.is.mss.analyzer.utils.druid.DruidTable
 import cn.ffcs.is.mss.analyzer.utils.druid.entity._
 import cn.ffcs.is.mss.analyzer.utils._
 import org.apache.flink.api.common.accumulators.LongCounter
+import org.apache.flink.api.common.eventtime.{SerializableTimestampAssigner, WatermarkStrategy}
 import org.apache.flink.api.common.functions.Partitioner
 import org.apache.flink.api.common.state.{ValueState, ValueStateDescriptor}
-import org.apache.flink.configuration.Configuration
-import org.apache.flink.streaming.api.TimeCharacteristic
-import org.apache.flink.streaming.api.functions.{AssignerWithPunctuatedWatermarks, ProcessFunction}
+import org.apache.flink.configuration.{ConfigOptions, Configuration}
+import org.apache.flink.streaming.api.functions.ProcessFunction
 import org.apache.flink.streaming.api.scala._
-import org.apache.flink.streaming.api.watermark.Watermark
-import org.apache.flink.streaming.api.windowing.assigners.{SlidingProcessingTimeWindows, TumblingEventTimeWindows}
+import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows
 import org.apache.flink.streaming.api.windowing.time.Time
-import org.apache.flink.streaming.connectors.kafka.FlinkKafkaConsumer
-import org.apache.flink.streaming.util.serialization.SimpleStringSchema
 import org.apache.flink.util.Collector
-import org.joda.time.{DateTime, DateTimeZone}
 
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
@@ -85,23 +82,14 @@ object UsedSystemWarn {
     //获取ExecutionEnvironment
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     //设置check pointing的间隔
-    env.enableCheckpointing(checkpointInterval)
-    //设置流的时间为EventTime
-    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
+//    env.enableCheckpointing(checkpointInterval)
     //设置flink全局变量
     env.getConfig.setGlobalJobParameters(parameters)
 
-    //设置kafka消费者相关配置
-    val props = new Properties()
-    //设置kafka集群地址
-    props.setProperty("bootstrap.servers", brokerList)
-    //设置flink消费的group.id
-    props.setProperty("group.id", groupId)
-
     //获取kafka消费者
-    val consumer = new FlinkKafkaConsumer[String](topic, new SimpleStringSchema, props).setStartFromGroupOffsets()
+    val consumer = Source.kafkaSource(topic, groupId, brokerList)
     // 获取kafka数据
-    val dStream = env.addSource(consumer).setParallelism(kafkaSourceParallelism)
+    val dStream = env.fromSource(consumer, WatermarkStrategy.noWatermarks(), kafkaSourceName).setParallelism(kafkaSourceParallelism)
       .uid(kafkaSourceName).name(kafkaSourceName)
 //    var path = "/Users/chenwei/Downloads/mss.1525735052963.txt"
 //    path = "/Users/chenwei/Downloads/14021053@HQ/14021053@HQ.txt"
@@ -130,24 +118,25 @@ object UsedSystemWarn {
       .filter(operationModel => !"未知系统".equals(operationModel.loginSystem))
 //      .map(operationModel => (TimeUtil.getDayStartTime(operationModel.timeStamp), operationModel.userName, mutable.Map[String,Long]((operationModel.loginSystem,operationModel.connCount))))
       .map(operationModel => (operationModel.timeStamp, operationModel.userName, mutable.Map[String,Long]((operationModel.loginSystem,operationModel.connCount))))
-      .assignTimestampsAndWatermarks(new AssignerWithPunctuatedWatermarks[(Long, String, mutable.Map[String,Long])] {
-        override def checkAndGetNextWatermark(lastElement: (Long, String, mutable.Map[String,Long]), extractedTimestamp: Long): Watermark =
-          new Watermark(extractedTimestamp - 10000L)
-
-        override def extractTimestamp(element: (Long, String, mutable.Map[String,Long]), previousElementTimestamp: Long): Long =
-          element._1
-      })
-      .keyBy(1)
+      .assignTimestampsAndWatermarks(
+        WatermarkStrategy.forBoundedOutOfOrderness[(Long, String, mutable.Map[String,Long])](Duration.ofSeconds(10))
+          .withTimestampAssigner(new SerializableTimestampAssigner[(Long, String, mutable.Map[String, Long])] {
+            override def extractTimestamp(element: (Long, String, mutable.Map[String, Long]), recordTimestamp: Long): Long = {
+              element._1
+            }
+          })
+      )
+      .keyBy(_._2)
       .window(TumblingEventTimeWindows.of(Time.days(1), Time.hours(0)))
       .reduce((o1,o2) =>{
         o2._3.foreach(tuple => o1._3.put(tuple._1,o1._3.getOrElseUpdate(tuple._1,0) + tuple._2))
         (o1._1,o2._2,o1._3)
       })
       .partitionCustom(new Partitioner[String] {
-        def partition(key: String, numPartitions: Int): Int = {
-          key.hashCode.abs % numPartitions
+          def partition(key: String, numPartitions: Int): Int = {
+            key.hashCode.abs % numPartitions
         }
-      }, 1)
+      }, x => x._2)
       .process(new UsedPlaceDeal()).setParallelism(dealParallelism)
 
     usedSystemWarnStream.addSink(new MySQLSink).uid(sqlSinkName).name(sqlSinkName)
@@ -183,18 +172,18 @@ object UsedSystemWarn {
 
       //获取全局配置
       val globConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
-      druidDateStartTime = globConf.getLong(Constants.DRUID_DATA_START_TIMESTAMP,0L)
-      DruidUtil.setDruidHostPortSet(globConf.getString(Constants.DRUID_BROKER_HOST_PORT, ""))
-      DruidUtil.setTimeFormat(globConf.getString(Constants.DRUID_TIME_FORMAT,""))
-      DruidUtil.setDateStartTimeStamp(globConf.getLong(Constants.DRUID_DATA_START_TIMESTAMP,0L))
+      druidDateStartTime = globConf.getLong(ConfigOptions.key(Constants.DRUID_DATA_START_TIMESTAMP).longType().defaultValue(0L))
+      DruidUtil.setDruidHostPortSet(globConf.getString(ConfigOptions.key(Constants.DRUID_BROKER_HOST_PORT).stringType().defaultValue("")))
+      DruidUtil.setTimeFormat(globConf.getString(ConfigOptions.key(Constants.DRUID_TIME_FORMAT).stringType().defaultValue("")))
+      DruidUtil.setDateStartTimeStamp(globConf.getLong(ConfigOptions.key(Constants.DRUID_DATA_START_TIMESTAMP).longType().defaultValue(0L)))
 
-      tableName = globConf.getString(Constants.DRUID_OPERATION_TABLE_NAME,"")
-      dealParallelism = globConf.getInteger(Constants.USED_SYSTEM_DEAL_PARALLELISM, 0)
+      tableName = globConf.getString(ConfigOptions.key(Constants.DRUID_OPERATION_TABLE_NAME).stringType().defaultValue(""))
+      dealParallelism = globConf.getInteger(ConfigOptions.key(Constants.USED_SYSTEM_DEAL_PARALLELISM).intType().defaultValue(0))
       if(historyLoginOpen == null){
         historyLoginOpen = queryHistoryLoginConnCount(TimeUtil.getDayStartTime(System.currentTimeMillis()))
       }
 
-      deltaPer = globConf.getDouble(Constants.USED_SYSTEM_DELTA_PER,0.3)
+      deltaPer = globConf.getDouble(ConfigOptions.key(Constants.USED_SYSTEM_DELTA_PER).doubleType().defaultValue(0.3))
     }
 
 

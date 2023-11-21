@@ -1,9 +1,9 @@
 package cn.ffcs.is.mss.analyzer.flink.unknowRisk.flink
 
-import cn.ffcs.is.mss.analyzer.bean.UnKnowRiskEntity
+import cn.ffcs.is.mss.analyzer.bean.{TestUnKnowRiskEntity, UnKnowRiskEntity}
 import cn.ffcs.is.mss.analyzer.utils.GetInputKafkaValue.getInputKafkaValue
 import cn.ffcs.is.mss.analyzer.druid.model.scala.OperationModel
-import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
+import cn.ffcs.is.mss.analyzer.flink.sink.{MySQLSink, Sink}
 import cn.ffcs.is.mss.analyzer.flink.unknowRisk.funcation.IndexOfSimilarityUtile
 import cn.ffcs.is.mss.analyzer.flink.unknowRisk.funcation.UnknownRiskUtil.{getUrlParameterMap, getUrlParameterTup}
 import cn.ffcs.is.mss.analyzer.utils.druid.entity._
@@ -11,21 +11,22 @@ import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties, JedisUtil, TimeU
 import org.apache.flink.api.common.accumulators.LongCounter
 import org.apache.flink.api.common.functions.{RichFilterFunction, RichMapFunction}
 import org.apache.flink.configuration.Configuration
-import org.apache.flink.streaming.api.TimeCharacteristic
 import org.apache.flink.streaming.api.functions.ProcessFunction
 import org.apache.flink.streaming.api.scala._
-import org.apache.flink.streaming.connectors.kafka.{FlinkKafkaConsumer, FlinkKafkaProducer}
-import org.apache.flink.streaming.util.serialization.SimpleStringSchema
 import org.apache.flink.util.Collector
 import org.apache.hadoop.fs.{FileSystem, Path}
 import org.json.JSONArray
 import redis.clients.jedis.{Jedis, JedisPool}
-
 import java.io.{BufferedReader, InputStreamReader}
 import java.net.{URI, URLDecoder}
 import java.sql.Timestamp
 import java.util
 import java.util.{Date, Properties}
+
+import cn.ffcs.is.mss.analyzer.flink.source.Source
+import org.apache.flink.api.common.eventtime.WatermarkStrategy
+import org.apache.flink.streaming.api.TimeCharacteristic
+
 import scala.collection.JavaConversions._
 import scala.collection.mutable
 import scala.util.control.Breaks.{break, breakable}
@@ -42,8 +43,8 @@ object UnKnowRiskStream {
     val confProperties = new IniProperties(args(0))
 
     //该任务的名字
-    val jobName = confProperties.getValue(Constants.UN_KNOW_RISK_WARN_CONFIG,
-      Constants.UN_KNOW_RISK_WARN_JOB_NAME)
+    val jobName = confProperties.getValue(Constants.TEST_UN_KNOW_RISK_WARN_CONFIG,
+      Constants.TEST_UN_KNOW_RISK_WARN_JOB_NAME)
 
     //source并行度
     val sourceParallelism = confProperties.getIntValue(Constants
@@ -59,14 +60,14 @@ object UnKnowRiskStream {
     val brokerList = confProperties.getValue(Constants.FLINK_COMMON_CONFIG, Constants
       .KAFKA_BOOTSTRAP_SERVERS)
     //flink消费的group.id
-    val groupId = confProperties.getValue(Constants.UN_KNOW_RISK_WARN_CONFIG,
-      Constants.UN_KNOW_RISK_WARN_GROUP_ID)
+    val groupId = confProperties.getValue(Constants.TEST_UN_KNOW_RISK_WARN_CONFIG,
+      Constants.TEST_UN_KNOW_RISK_WARN_GROUP_ID)
     //kafka source的topic
     val sourceTopic = confProperties.getValue(Constants.OPERATION_FLINK_TO_DRUID_CONFIG, Constants
       .OPERATION_TOPIC)
     //kafka sink的topic
-    val sinkTopic = confProperties.getValue(Constants.UN_KNOW_RISK_WARN_CONFIG, Constants
-      .UN_KNOW_RISK_WARN_KAFKA_SINK_TOPIC)
+    val sinkTopic = confProperties.getValue(Constants.TEST_UN_KNOW_RISK_WARN_CONFIG, Constants
+      .TEST_UN_KNOW_RISK_WARN_KAFKA_SINK_TOPIC)
     //check pointing的间隔
     val checkpointInterval = confProperties.getLongValue(Constants.UN_KNOW_RISK_WARN_CONFIG,
       Constants.UN_KNOW_RISK_WARN_CHECKPOINT_INTERVAL)
@@ -80,12 +81,14 @@ object UnKnowRiskStream {
     props.setProperty("group.id", groupId)
 
     //获取kafka消费者
-    val consumer = new FlinkKafkaConsumer[String](sourceTopic, new SimpleStringSchema,
-      props).setStartFromGroupOffsets()
-    //获取kafka生产者
-    val producer = new FlinkKafkaProducer[String](brokerList, sinkTopic, new
-        SimpleStringSchema())
+//    val consumer = new FlinkKafkaConsumer[String](sourceTopic, new SimpleStringSchema,
+//      props).setStartFromGroupOffsets()
 
+    val consumer = Source.kafkaSource(sourceTopic, groupId, brokerList)
+    //获取kafka生产者
+//    val producer = new FlinkKafkaProducer[String](brokerList, sinkTopic, new
+//        SimpleStringSchema())
+    val producer = Sink.kafkaSink(brokerList, sinkTopic)
     //ip-地点关联文件路径
     val placePath = confProperties.getValue(Constants.OPERATION_FLINK_TO_DRUID_CONFIG, Constants
       .OPERATION_PLACE_PATH)
@@ -96,8 +99,8 @@ object UnKnowRiskStream {
     val usedPlacePath = confProperties.getValue(Constants.OPERATION_FLINK_TO_DRUID_CONFIG,
       Constants.OPERATION_USEDPLACE_PATH)
 
-    val warningSinkTopic = confProperties.getValue(Constants.WARNING_FLINK_TO_DRUID_CONFIG, Constants
-      .WARNING_TOPIC)
+    val warningSinkTopic = confProperties.getValue(Constants.TEST_UN_KNOW_RISK_WARN_CONFIG, Constants
+      .TEST_UN_KNOW_RISK_WARN_WARNING_TOPIC)
 
     //flink全局变量
     val parameters: Configuration = new Configuration()
@@ -128,12 +131,13 @@ object UnKnowRiskStream {
     //获取ExecutionEnvironment
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     //设置check pointing的间隔
-    env.enableCheckpointing(checkpointInterval)
+//    env.enableCheckpointing(checkpointInterval)
     //设置flink全局变量
     env.getConfig.setGlobalJobParameters(parameters)
-    env.setStreamTimeCharacteristic(TimeCharacteristic.ProcessingTime)
+//    env.setStreamTimeCharacteristic(TimeCharacteristic.ProcessingTime)
 
-    val dStream = env.addSource(consumer).setParallelism(sourceParallelism)
+    val dStream = env.fromSource(consumer,WatermarkStrategy.noWatermarks(),"mssOperation")
+//    val dStream = env.addSource(consumer).setParallelism(sourceParallelism)
     val value = dStream.map(new RichMapFunction[String, (Option[OperationModel], String)] {
       override def open(parameters: Configuration): Unit = {
         OperationModel.setPlaceMap(placePath)
@@ -157,19 +161,21 @@ object UnKnowRiskStream {
       .setParallelism(sinkParallelism)
 
     unknowValue
-      .filter(_._1.asInstanceOf[UnKnowRiskEntity].getIsUnKnowRisk == 1)
+      .filter(_._1.asInstanceOf[TestUnKnowRiskEntity].getIsUnKnowRisk == 1)
       .map(o => {
-        JsonUtil.toJson(o._1.asInstanceOf[UnKnowRiskEntity])
+        JsonUtil.toJson(o._1.asInstanceOf[TestUnKnowRiskEntity])
       })
-      .addSink(producer)
-      .setParallelism(sinkParallelism)
+//      .addSink(producer)
+     .sinkTo(producer)
+//      .setParallelism(sinkParallelism)
 
     //将告警数据写入告警库topic
-    val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
-        SimpleStringSchema())
+//    val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
+//        SimpleStringSchema())
+    val warningProducer = Sink.kafkaSink(brokerList, warningSinkTopic)
 
-    alertKafkaValue.addSink(warningProducer).setParallelism(sinkParallelism)
-
+//    alertKafkaValue.addSink(warningProducer).setParallelism(sinkParallelism)
+    alertKafkaValue.sinkTo(warningProducer).setParallelism(sinkParallelism)
 
     env.execute(jobName)
   }
@@ -279,7 +285,7 @@ object UnKnowRiskStream {
       urlMap = getUrlParameterMap(url)
       //todo java 代码执行检测
       if (getIsJavaCodeInject(url, ".", samplePeriod * 3) || getIsJavaCodeInject(ua, ".", samplePeriod * 3)) {
-        val unKnowRiskEntity = new UnKnowRiskEntity()
+        val unKnowRiskEntity = new TestUnKnowRiskEntity()
         unKnowRiskEntity.setUserName(operationModelValue.userName)
         unKnowRiskEntity.setSourceIp(operationModelValue.sourceIp)
         unKnowRiskEntity.setAlertTime(new Timestamp(operationModelValue.timeStamp))
@@ -303,7 +309,7 @@ object UnKnowRiskStream {
         orderMessage1.add(1)
         if (urlTest._1.contains("cmd") && urlMap.contains("cmd")) {
           orderMessage2.add(1)
-          val unKnowRiskEntity = new UnKnowRiskEntity()
+          val unKnowRiskEntity = new TestUnKnowRiskEntity()
           unKnowRiskEntity.setUserName(operationModelValue.userName)
           unKnowRiskEntity.setSourceIp(operationModelValue.sourceIp)
           unKnowRiskEntity.setAlertTime(new Timestamp(operationModelValue.timeStamp))
@@ -348,7 +354,7 @@ object UnKnowRiskStream {
         val timeLong = new Date().getTime
         val queryResultList: util.List[util.Map[String, String]] = DruidUtil.query(getDruidWarnQueryEntity(timeLong - TimeUtil.DAY_MILLISECOND * samplePeriod,
           timeLong, operationModelValue.destinationIp, tableName, samplePeriod))
-        val unKnowRiskEntity = new UnKnowRiskEntity()
+        val unKnowRiskEntity = new TestUnKnowRiskEntity()
         unKnowRiskEntity.setUserName(operationModelValue.userName)
         unKnowRiskEntity.setSourceIp(operationModelValue.sourceIp)
         unKnowRiskEntity.setAlertTime(new Timestamp(operationModelValue.timeStamp))
@@ -450,7 +456,7 @@ object UnKnowRiskStream {
               }
               d = IndexOfSimilarityUtile.IndexOfSimilarity(urlSampleValue, urlTestValue).sim()
               if (urlSampleKey.equals(urlTestKey)) {
-                val unKnowRiskEntity = new UnKnowRiskEntity()
+                val unKnowRiskEntity = new TestUnKnowRiskEntity()
                 unKnowRiskEntity.setUserName(operationModelValue.userName)
                 unKnowRiskEntity.setSourceIp(operationModelValue.sourceIp)
                 unKnowRiskEntity.setSourcePort(operationModelValue.sourcePort)

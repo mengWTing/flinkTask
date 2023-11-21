@@ -55,12 +55,7 @@ class UserBehaviorAnalyzerPhoenixSink extends RichSinkFunction[UserBehaviorPhoen
     //C3P0Util.iniPhoenix(c3p0Properties)
   }
 
-  override def invoke(value: UserBehaviorPhoenixModel, context: SinkFunction.Context[_]): Unit = {
-
-
-    //val connection = C3P0Util.getPhoenixConnection
-
-
+  override def invoke(value: UserBehaviorPhoenixModel, context: SinkFunction.Context): Unit = {
     if (connection == null || connection.isClosed){
       connection = getConnection(url)
     }
@@ -102,9 +97,7 @@ class UserBehaviorAnalyzerPhoenixSink extends RichSinkFunction[UserBehaviorPhoen
     insertPrepareStatement.execute()
     connection.commit()
     connection.close()
-
   }
-
 
   def getConnection(url: String): Connection = {
     DriverManager.getConnection(url)

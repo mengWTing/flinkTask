@@ -2,27 +2,28 @@ package cn.ffcs.is.mss.analyzer.flink.warn
 
 import cn.ffcs.is.mss.analyzer.bean.ReboundShellWarnEntity
 import cn.ffcs.is.mss.analyzer.druid.model.scala.OperationModel
-import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
+import cn.ffcs.is.mss.analyzer.flink.sink.{MySQLSink, Sink}
 import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties}
 import com.twitter.logging.config.BareFormatterConfig.{intoList, intoOption}
 import org.apache.flink.api.common.functions.RichFlatMapFunction
 import org.apache.flink.api.common.state.{ValueState, ValueStateDescriptor}
-import org.apache.flink.configuration.Configuration
-import org.apache.flink.streaming.api.functions.AssignerWithPunctuatedWatermarks
+import org.apache.flink.configuration.{ConfigOptions, Configuration}
 import org.apache.flink.streaming.api.scala.function.ProcessAllWindowFunction
 import org.apache.flink.streaming.api.scala.{StreamExecutionEnvironment, _}
-import org.apache.flink.streaming.api.watermark.Watermark
 import org.apache.flink.streaming.api.windowing.time.Time
 import org.apache.flink.streaming.api.windowing.windows.TimeWindow
-import org.apache.flink.streaming.connectors.kafka.{FlinkKafkaConsumer, FlinkKafkaProducer}
-import org.apache.flink.streaming.util.serialization.SimpleStringSchema
 import org.apache.flink.util.Collector
 import org.apache.hadoop.fs.{FileSystem, Path}
-
 import java.io.{BufferedReader, InputStreamReader}
 import java.net.{URI, URLDecoder}
 import java.sql.Timestamp
+import java.time.Duration
 import java.util.Properties
+
+import cn.ffcs.is.mss.analyzer.flink.source.Source
+import org.apache.flink.api.common.eventtime.{SerializableTimestampAssigner, WatermarkStrategy}
+import org.apache.flink.streaming.api.windowing.assigners.SlidingProcessingTimeWindows
+
 import scala.collection.JavaConversions._
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
@@ -109,19 +110,10 @@ object ReboundShellWarn {
     val usedPlacePath = confProperties.getValue(Constants.OPERATION_FLINK_TO_DRUID_CONFIG,
       Constants.OPERATION_USEDPLACE_PATH)
 
-
-    //设置kafka消费者相关配置
-    //设置kafka消费者相关配置
-    val props = new Properties()
-    //设置kafka集群地址
-    props.setProperty("bootstrap.servers", brokerList)
-    //设置flink消费的group.id
-    props.setProperty("group.id", groupId + "test")
     //获取kafka消费者
-    val consumer = new FlinkKafkaConsumer[String](topic, new SimpleStringSchema, props)
-      .setStartFromLatest()
+    val consumer = Source.kafkaSource(topic, groupId, brokerList)
     //获取kafka 生产者
-    val producer = new FlinkKafkaProducer[String](brokerList, kafkaSinkTopic, new SimpleStringSchema())
+    val producer = Sink.kafkaSink(brokerList, kafkaSinkTopic)
 
     //获取ExecutionEnvironment
     val env = StreamExecutionEnvironment.getExecutionEnvironment
@@ -129,9 +121,8 @@ object ReboundShellWarn {
     //    env.enableCheckpointing(checkpointInterval)
     //设置flink全局变量
     env.getConfig.setGlobalJobParameters(parameters)
-
-    val valueStream = env.addSource(consumer).setParallelism(sourceParallelism)
-    //val valueStream = env.socketTextStream("192.168.1.24", 9999)
+    env.getConfig.setAutoWatermarkInterval(0)
+    val valueStream = env.fromSource(consumer, WatermarkStrategy.noWatermarks(), "kafkaSource").setParallelism(sourceParallelism)
       .filter(_.split("\\|", -1).length >= 33).setParallelism(1)
       .flatMap(new RichFlatMapFunction[String, (Long, String, String, String, String)] {
         override def flatMap(value: String, out: Collector[(Long, String, String, String, String)]): Unit = {
@@ -153,20 +144,17 @@ object ReboundShellWarn {
       }
       ).setParallelism(1)
       .filter(_.isDefined)
-      .assignTimestampsAndWatermarks(new AssignerWithPunctuatedWatermarks[(Long, String, String, String, String)] {
-        override def checkAndGetNextWatermark(lastElement: (Long, String, String, String, String),
-                                              extractedTimestamp: Long): Watermark = {
-          new Watermark(extractedTimestamp - 10000)
-        }
-
-        override def extractTimestamp(element: (Long, String, String, String, String), previousElementTimestamp: Long): Long = {
-          //          element._1.head
-          element._1
-        }
-      }).setParallelism(dealParallelism)
+      .assignTimestampsAndWatermarks(
+        WatermarkStrategy.forBoundedOutOfOrderness[(Long, String, String, String, String)](Duration.ofSeconds(10))
+          .withTimestampAssigner(new SerializableTimestampAssigner[(Long, String, String, String, String)] {
+            override def extractTimestamp(element: (Long, String, String, String, String), recordTimestamp: Long): Long = {
+              element._1
+            }
+          })
+      ).setParallelism(dealParallelism)
 
     val sinkData: DataStream[((Object, Boolean), String)] = valueStream
-      .timeWindowAll(Time.seconds(timeWindow), Time.seconds(timeWindow))
+      .windowAll(SlidingProcessingTimeWindows.of(Time.seconds(90), Time.seconds(90)))
       .process(new ReboundShellProcessFunction).setParallelism(1)
 
     val mysqlSinkData = sinkData.map(_._1)
@@ -209,14 +197,13 @@ object ReboundShellWarn {
 
     override def open(parameters: Configuration): Unit = {
       val globConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
-      portWhiteList = globConf.getString(Constants.ACTIVE_OUTREACH_ANALYZE_PORT_WHITE_LIST, "")
-      ipWhiteListPlath = globConf.getString(Constants.ACTIVE_OUTREACH_ANALYZE_IP_WHITE_LIST, "")
-      officePlaceListPlath = globConf.getString(Constants.ACTIVE_OUTREACH_ANALYZE_OFFICE_IP, "")
-      specialIp = globConf.getString(Constants.ACTIVE_OUTREACH_ANALYZE_SPECIAL_IP, "")
-      trainFlag = globConf.getString(Constants.REBOUND_SHELL_WARN_CONFIG_REBOUND_ORDER_FLAG, "")
+      portWhiteList = globConf.getString(ConfigOptions.key(Constants.ACTIVE_OUTREACH_ANALYZE_PORT_WHITE_LIST).stringType().defaultValue(""))
+      ipWhiteListPlath = globConf.getString(ConfigOptions.key(Constants.ACTIVE_OUTREACH_ANALYZE_IP_WHITE_LIST).stringType().defaultValue(""))
+      officePlaceListPlath = globConf.getString(ConfigOptions.key(Constants.ACTIVE_OUTREACH_ANALYZE_OFFICE_IP).stringType().defaultValue(""))
+      specialIp = globConf.getString(ConfigOptions.key(Constants.ACTIVE_OUTREACH_ANALYZE_SPECIAL_IP).stringType().defaultValue(""))
+      trainFlag = globConf.getString(ConfigOptions.key(Constants.REBOUND_SHELL_WARN_CONFIG_REBOUND_ORDER_FLAG).stringType().defaultValue(""))
 
-
-      val systemType = globConf.getString(Constants.FILE_SYSTEM_TYPE, "")
+      val systemType = globConf.getString(ConfigOptions.key(Constants.FILE_SYSTEM_TYPE).stringType().defaultValue(""))
       val fs = FileSystem.get(URI.create(systemType), new org.apache.hadoop.conf.Configuration())
 
       val fsDataInputStream = fs.open(new Path(ipWhiteListPlath))

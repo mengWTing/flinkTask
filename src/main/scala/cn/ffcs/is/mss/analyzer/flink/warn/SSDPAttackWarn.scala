@@ -1,20 +1,20 @@
 package cn.ffcs.is.mss.analyzer.flink.warn
 
 import java.sql.Timestamp
+import java.time.Duration
 import java.util.Properties
 
 import cn.ffcs.is.mss.analyzer.bean.DdosWarnEntity
 import cn.ffcs.is.mss.analyzer.druid.model.scala.QuintetModel
-import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
+import cn.ffcs.is.mss.analyzer.flink.sink.{MySQLSink, Sink}
+import cn.ffcs.is.mss.analyzer.flink.source.Source
 import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties, JsonUtil}
-import org.apache.flink.configuration.Configuration
-import org.apache.flink.streaming.api.TimeCharacteristic
-import org.apache.flink.streaming.api.functions.{AssignerWithPunctuatedWatermarks, ProcessFunction}
+import org.apache.flink.api.common.eventtime.{SerializableTimestampAssigner, WatermarkStrategy}
+import org.apache.flink.configuration.{ConfigOptions, Configuration}
+import org.apache.flink.streaming.api.functions.ProcessFunction
 import org.apache.flink.streaming.api.scala._
-import org.apache.flink.streaming.api.watermark.Watermark
+import org.apache.flink.streaming.api.windowing.assigners.SlidingEventTimeWindows
 import org.apache.flink.streaming.api.windowing.time.Time
-import org.apache.flink.streaming.connectors.kafka.{FlinkKafkaConsumer, FlinkKafkaProducer}
-import org.apache.flink.streaming.util.serialization.SimpleStringSchema
 import org.apache.flink.util.Collector
 
 import scala.collection.mutable.ArrayBuffer
@@ -83,44 +83,31 @@ object SSDPAttackWarn {
 
     val env = StreamExecutionEnvironment.getExecutionEnvironment
 
-    env.enableCheckpointing(checkpointInterval)
-    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
-
+//    env.enableCheckpointing(checkpointInterval)
     env.getConfig.setGlobalJobParameters(parameters)
 
-
-    //设置kafka消费者相关配置
-    val props = new Properties()
-    //设置kafka集群地址
-    props.setProperty("bootstrap.servers", brokerList)
-    //设置flink消费的group.id
-    props.setProperty("group.id", groupId)
-
     //获取kafka消费者
-    val consumer = new FlinkKafkaConsumer[String](kafkaSourceTopic, new SimpleStringSchema, props)
-      .setStartFromGroupOffsets()
+    val consumer = Source.kafkaSource(kafkaSourceTopic, groupId, brokerList)
 
-    val alertData = env.addSource(consumer).setParallelism(kafkaSourceParallelism)
+    val alertData = env.fromSource(consumer, WatermarkStrategy.noWatermarks(), kafkaSourceName).setParallelism(kafkaSourceParallelism)
       .uid(kafkaSourceName).name(kafkaSourceName)
       .map(JsonUtil.fromJson[QuintetModel] _).setParallelism(dealParallelism)
       .filter(model => {
         "1900".equals(model.destinationPort) && "0".equals(model.protocol)
       }).setParallelism(dealParallelism)
-      .assignTimestampsAndWatermarks(new AssignerWithPunctuatedWatermarks[QuintetModel] {
-        override def
-        checkAndGetNextWatermark(lastElement: QuintetModel, extractedTimestamp: Long): Watermark = {
-          new Watermark(extractedTimestamp - 10000)
-        }
-
-        override def extractTimestamp(element: QuintetModel, previousElementTimestamp: Long): Long = {
-          element.timeStamp
-        }
-      })
+      .assignTimestampsAndWatermarks(
+        WatermarkStrategy.forBoundedOutOfOrderness[QuintetModel](Duration.ofSeconds(10))
+          .withTimestampAssigner(new SerializableTimestampAssigner[QuintetModel] {
+            override def extractTimestamp(element: QuintetModel, recordTimestamp: Long): Long = {
+              element.timeStamp
+            }
+          })
+      )
       .map(model => {
         (model.timeStamp / 1000 / 60 * 1000 * 60 + "-" + model.destinationIp, ArrayBuffer[QuintetModel](model))
       }).setParallelism(dealParallelism)
-      .keyBy(0)
-      .timeWindow(Time.minutes(1L), Time.minutes(1L))
+      .keyBy(_._1)
+      .window(SlidingEventTimeWindows.of(Time.minutes(1L), Time.minutes(1L)))
       .reduce((o1, o2) => {
         (o1._1, o1._2.++(o2._2)
         )
@@ -136,20 +123,19 @@ object SSDPAttackWarn {
       .setParallelism(sqlSinkParallelism)
 
     //获取kafka生产者
-    val producer = new FlinkKafkaProducer[String](brokerList, kafkaSinkTopic, new SimpleStringSchema())
+    val producer = Sink.kafkaSink(brokerList, kafkaSinkTopic)
     alertData.map(m => {
       JsonUtil.toJson(m._1._1.asInstanceOf[DdosWarnEntity])
     })
-      .addSink(producer)
+      .sinkTo(producer)
       .uid(kafkaSinkName)
       .name(kafkaSinkName)
       .setParallelism(kafkaSinkParallelism)
 
 
     //将告警数据写入告警库topic
-    val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
-        SimpleStringSchema())
-    alertKafkaValue.addSink(warningProducer).setParallelism(kafkaSinkParallelism)
+    val warningProducer = Sink.kafkaSink(brokerList, warningSinkTopic)
+    alertKafkaValue.sinkTo(warningProducer).setParallelism(kafkaSinkParallelism)
 
     env.execute(jobName)
 
@@ -162,7 +148,7 @@ object SSDPAttackWarn {
     override def open(parameters: Configuration): Unit = {
       val globConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
 
-      threshold = globConf.getInteger(Constants.DDOS_SSDP_DETECT_THRESHOLD, 0)
+      threshold = globConf.getInteger(ConfigOptions.key(Constants.DDOS_SSDP_DETECT_THRESHOLD).intType().defaultValue(0))
     }
 
     override def processElement(value: (String, ArrayBuffer[QuintetModel]), ctx: ProcessFunction[(String,

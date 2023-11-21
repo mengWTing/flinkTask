@@ -6,7 +6,7 @@ import java.util.Properties
 
 import cn.ffcs.is.mss.analyzer.utils.{C3P0Util, Constants, SQLHelper}
 import org.apache.flink.api.common.accumulators.LongCounter
-import org.apache.flink.configuration.Configuration
+import org.apache.flink.configuration.{ConfigOptions, Configuration}
 import org.apache.flink.streaming.api.functions.sink.RichSinkFunction
 import org.apache.hadoop.fs.{FileSystem, Path}
 
@@ -29,8 +29,8 @@ class MySQLSink() extends RichSinkFunction[(Object, Boolean)] {
 
     //根据c3p0配置文件,初始化c3p0连接池
     val c3p0Properties = new Properties()
-    val c3p0ConfigPath = globConf.getString(Constants.c3p0_CONFIG_PATH, "")
-    val fileSystemType = globConf.getString(Constants.FILE_SYSTEM_TYPE, "")
+    val c3p0ConfigPath = globConf.getString(ConfigOptions.key(Constants.c3p0_CONFIG_PATH).stringType().defaultValue(""))
+    val fileSystemType = globConf.getString(ConfigOptions.key(Constants.FILE_SYSTEM_TYPE).stringType().defaultValue(""))
 
     val fs = FileSystem.get(URI.create(fileSystemType), new org.apache.hadoop.conf.Configuration())
     val fsDataInputStream = fs.open(new Path(c3p0ConfigPath))

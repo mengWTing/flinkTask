@@ -2,23 +2,24 @@ package cn.ffcs.is.mss.analyzer.flink.warn
 
 import java.sql.Timestamp
 import java.util.Properties
+
 import cn.ffcs.is.mss.analyzer.bean.BbasUaAttackAttemptEntity
 import cn.ffcs.is.mss.analyzer.druid.model.scala.OperationModel
-import cn.ffcs.is.mss.analyzer.druid.model.scala.OperationModel.getHost
-import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
+import cn.ffcs.is.mss.analyzer.flink.sink.{MySQLSink, Sink}
 import cn.ffcs.is.mss.analyzer.utils.GetInputKafkaValue.getInputKafkaValue
 import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties, JedisUtil, JsonUtil}
-import org.apache.flink.configuration.Configuration
+import org.apache.flink.configuration.{ConfigOptions, Configuration}
 import org.apache.flink.streaming.api.functions.ProcessFunction
 import org.apache.flink.streaming.api.scala._
-import org.apache.flink.streaming.connectors.kafka.{FlinkKafkaConsumer, FlinkKafkaProducer}
-import org.apache.flink.streaming.util.serialization.SimpleStringSchema
 import org.apache.flink.util.Collector
 import org.apache.hadoop.fs.{FileSystem, Path}
 import redis.clients.jedis.{Jedis, JedisPool}
-
 import java.io.{BufferedReader, InputStreamReader}
 import java.net.{URI, URLDecoder}
+
+import cn.ffcs.is.mss.analyzer.flink.source.Source
+import org.apache.flink.api.common.eventtime.WatermarkStrategy
+
 import scala.collection.mutable.ArrayBuffer
 
 /**
@@ -91,27 +92,23 @@ object AttackAttemptWarn {
     val checkpointInterval = confProperties.getLongValue(Constants
       .ATTACK_ATTEMPT_CONFIG, Constants.ATTACK_ATTEMPT_CHECKPOINT_INTERVAL)
 
-    //设置kafka消费者相关配置
-    val props = new Properties()
-    //设置kafka集群地址
-    props.setProperty("bootstrap.servers", brokerList)
-    //设置flink消费的group.id
-    props.setProperty("group.id", groupId)
     //获取kafka消费者
-    val consumer = new FlinkKafkaConsumer[String](sourceTopic, new SimpleStringSchema, props)
-      .setStartFromLatest()
+    val consumer = Source.kafkaSource(sourceTopic, groupId, brokerList)
+
     //获取kafka 生产者
-    val producer = new FlinkKafkaProducer[String](brokerList, sinkTopic, new SimpleStringSchema())
-    val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
-        SimpleStringSchema())
+    val producer = Sink.kafkaSink(brokerList, sinkTopic)
+    val warningProducer = Sink.kafkaSink(brokerList, warningSinkTopic)
 
     //获取ExecutionEnvironment
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     //设置checkpoint
-    env.enableCheckpointing(checkpointInterval)
+//    env.enableCheckpointing(checkpointInterval)
     env.getConfig.setGlobalJobParameters(parameters)
+    env.getConfig.setAutoWatermarkInterval(0)
+
     //获取Kafka数据流
-    val attackAttemptWarnStream = env.addSource(consumer).setParallelism(sourceParallelism)
+    val attackAttemptWarnStream = env.fromSource(consumer, WatermarkStrategy.noWatermarks(), "kafkaSource").setParallelism(sourceParallelism)
+        .uid("kafkaSource").name("kafkaSource")
       .process(new AttackAttemptProcessFunction).setParallelism(dealParallelism)
 
     val value: DataStream[(Object, Boolean)] = attackAttemptWarnStream.map(_._1)
@@ -123,10 +120,10 @@ object AttackAttemptWarn {
       .map(o => {
         JsonUtil.toJson(o._1.asInstanceOf[BbasUaAttackAttemptEntity])
       })
-      .addSink(producer)
+      .sinkTo(producer)
       .setParallelism(sinkParallelism)
 
-    alertKafkaValue.addSink(warningProducer).setParallelism(sinkParallelism)
+    alertKafkaValue.sinkTo(warningProducer).setParallelism(sinkParallelism)
 
     env.execute(jobName)
 
@@ -144,11 +141,11 @@ object AttackAttemptWarn {
     var packageValue = ""
     override def open(parameters: Configuration): Unit = {
       val globConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
-      attackKeyStr = globConf.getString(Constants.ATTACK_ATTEMPT_KEY_STRING, "")
-      pythonWhiteList = globConf.getString(Constants.ATTACK_ATTEMPT_PYTHON_WHITE_LIST, "")
-      val fileSystemType = globConf.getString(Constants.FILE_SYSTEM_TYPE, "/")
+      attackKeyStr = globConf.getString(ConfigOptions.key(Constants.ATTACK_ATTEMPT_KEY_STRING).stringType().defaultValue(""))
+      pythonWhiteList = globConf.getString(ConfigOptions.key(Constants.ATTACK_ATTEMPT_PYTHON_WHITE_LIST).stringType().defaultValue(""))
+      val fileSystemType = globConf.getString(ConfigOptions.key(Constants.FILE_SYSTEM_TYPE).stringType().defaultValue("/"))
 
-      val jedisConfigPath = globConf.getString(Constants.REDIS_PACKAGE_PROPERTIES, "")
+      val jedisConfigPath = globConf.getString(ConfigOptions.key(Constants.REDIS_PACKAGE_PROPERTIES).stringType().defaultValue(""))
 
       val matchArr = attackKeyStr.split("\\|", -1)
       val pythonWhiteListArr = pythonWhiteList.split("\\|", -1)

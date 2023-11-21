@@ -1,21 +1,20 @@
 package cn.ffcs.is.mss.analyzer.flink.warn
 
 import java.sql.Timestamp
+import java.time.Duration
 import java.util.{Date, Properties}
 
-import cn.ffcs.is.mss.analyzer.bean.{DdosWarnEntity, UselessAccountEntity, UselessAccountImproveEntity}
+import cn.ffcs.is.mss.analyzer.bean.{DdosWarnEntity,UselessAccountImproveEntity}
 import cn.ffcs.is.mss.analyzer.druid.model.scala.OperationModel
-import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
+import cn.ffcs.is.mss.analyzer.flink.sink.{MySQLSink, Sink}
+import cn.ffcs.is.mss.analyzer.flink.source.Source
 import cn.ffcs.is.mss.analyzer.utils.GetInputKafkaValue.getInputKafkaValue
 import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties, JsonUtil, TimeUtil}
+import org.apache.flink.api.common.eventtime.{SerializableTimestampAssigner, WatermarkStrategy}
 import org.apache.flink.api.common.state.{ValueState, ValueStateDescriptor}
-import org.apache.flink.configuration.Configuration
-import org.apache.flink.streaming.api.TimeCharacteristic
-import org.apache.flink.streaming.api.functions.{AssignerWithPunctuatedWatermarks, ProcessFunction}
+import org.apache.flink.configuration.{ConfigOptions, Configuration}
+import org.apache.flink.streaming.api.functions.KeyedProcessFunction
 import org.apache.flink.streaming.api.scala.StreamExecutionEnvironment
-import org.apache.flink.streaming.api.watermark.Watermark
-import org.apache.flink.streaming.connectors.kafka.{FlinkKafkaConsumer, FlinkKafkaProducer}
-import org.apache.flink.streaming.util.serialization.SimpleStringSchema
 import org.apache.flink.util.Collector
 import org.apache.flink.streaming.api.scala._
 
@@ -92,38 +91,27 @@ object UselessAccount {
     //获取ExecutionEnvironment
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     //设置check pointing的间隔
-    env.enableCheckpointing(checkpointInterval)
+//    env.enableCheckpointing(checkpointInterval)
     //设置flink全局变量
     env.getConfig.setGlobalJobParameters(parameters)
-    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
-
-    //设置kafka消费者相关配置
-    val props = new Properties()
-    //设置kafka集群地址
-    props.setProperty("bootstrap.servers", brokerList)
-    //设置flink消费的group.id
-    props.setProperty("group.id", groupId)
 
     //获取kafka消费者
-    val consumer = new FlinkKafkaConsumer[String](kafkaSourceTopic, new SimpleStringSchema,
-      props).setStartFromGroupOffsets()
+    val consumer = Source.kafkaSource(kafkaSourceTopic, groupId, brokerList)
 
-    val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
-        SimpleStringSchema())
+    val warningProducer = Sink.kafkaSink(brokerList, warningSinkTopic)
 
-    val alertValue = env.addSource(consumer).setParallelism(kafkaSourceParallelism)
+    val alertValue = env.fromSource(consumer, WatermarkStrategy.noWatermarks(), kafkaSourceName).setParallelism(kafkaSourceParallelism)
       .uid(kafkaSourceName).name(kafkaSourceName)
       .map(JsonUtil.fromJson[OperationModel] _).setParallelism(dealParallelism)
       .filter(_.userName != "匿名用户").setParallelism(dealParallelism)
-      .assignTimestampsAndWatermarks(new AssignerWithPunctuatedWatermarks[OperationModel] {
-        override def
-        checkAndGetNextWatermark(lastElement: OperationModel, extractedTimestamp: Long): Watermark =
-          new Watermark(extractedTimestamp - 10000)
-
-        override def extractTimestamp(element: OperationModel, previousElementTimestamp: Long): Long = {
-          element.timeStamp
-        }
-      }).setParallelism(dealParallelism)
+      .assignTimestampsAndWatermarks(
+        WatermarkStrategy.forBoundedOutOfOrderness[OperationModel](Duration.ofSeconds(10))
+          .withTimestampAssigner(new SerializableTimestampAssigner[OperationModel] {
+            override def extractTimestamp(element: OperationModel, recordTimestamp: Long): Long = {
+              element.timeStamp
+            }
+          })
+      ).setParallelism(dealParallelism)
       .keyBy(_.userName)
       .process(new UselessAccountProcessFunction)
 
@@ -131,23 +119,23 @@ object UselessAccount {
       .uid(sqlSinkName).name(sqlSinkName).setParallelism(sqlSinkParallelism)
 
     //获取kafka生产者
-    val producer = new FlinkKafkaProducer[String](brokerList, kafkaSinkTopic, new SimpleStringSchema())
+    val producer = Sink.kafkaSink(brokerList, kafkaSinkTopic)
     alertValue.map(m => {
       JsonUtil.toJson(m._1._1.asInstanceOf[DdosWarnEntity])
     })
-      .addSink(producer)
+      .sinkTo(producer)
       .uid(kafkaSinkName)
       .name(kafkaSinkName)
       .setParallelism(sinkParallelism)
 
     //将告警数据写入告警库topic
-    alertValue.map(_._2).addSink(warningProducer).setParallelism(sinkParallelism)
+    alertValue.map(_._2).sinkTo(warningProducer).setParallelism(sinkParallelism)
 
 
     env.execute(jobName)
   }
 
-  class UselessAccountProcessFunction extends ProcessFunction[OperationModel, ((Object, Boolean), String)] {
+  class UselessAccountProcessFunction extends KeyedProcessFunction[String, OperationModel, ((Object, Boolean), String)] {
 
 
     var decideLength: Int = _
@@ -158,13 +146,10 @@ object UselessAccount {
 
     override def open(parameters: Configuration): Unit = {
       val globConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
-      decideLength = globConf.getInteger(Constants.USELESS_ACCOUNT_DECIDE_TIME_LENGTH, 0)
-
-
+      decideLength = globConf.getInteger(ConfigOptions.key(Constants.USELESS_ACCOUNT_DECIDE_TIME_LENGTH).intType().defaultValue(0))
     }
 
-
-    override def processElement(value: OperationModel, ctx: ProcessFunction[OperationModel, ((Object, Boolean), String)
+    override def processElement(value: OperationModel, ctx: KeyedProcessFunction[String, OperationModel, ((Object, Boolean), String)
     ]#Context, out: Collector[((Object, Boolean), String)]): Unit = {
       val currentTime = value.timeStamp
 
@@ -183,7 +168,7 @@ object UselessAccount {
       }
     }
 
-    override def onTimer(timestamp: Long, ctx: ProcessFunction[OperationModel, ((Object, Boolean), String)]#OnTimerContext,
+    override def onTimer(timestamp: Long, ctx: KeyedProcessFunction[String, OperationModel, ((Object, Boolean), String)]#OnTimerContext,
                          out: Collector[((Object, Boolean), String)]): Unit = {
 
       val operationModel = userAccountInfo.value()

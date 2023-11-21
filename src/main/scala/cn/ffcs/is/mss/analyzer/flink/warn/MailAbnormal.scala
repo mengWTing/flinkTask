@@ -7,18 +7,16 @@ import java.util.{Date, Properties}
 
 import cn.ffcs.is.mss.analyzer.bean.MailAbnormalLoginIpEntity
 import cn.ffcs.is.mss.analyzer.druid.model.scala.MailModel
-import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
+import cn.ffcs.is.mss.analyzer.flink.sink.{MySQLSink, Sink}
+import cn.ffcs.is.mss.analyzer.flink.source.Source
 import cn.ffcs.is.mss.analyzer.utils.druid.entity._
 import cn.ffcs.is.mss.analyzer.utils._
 import org.apache.flink.api.common.accumulators.LongCounter
+import org.apache.flink.api.common.eventtime.WatermarkStrategy
 import org.apache.flink.api.common.functions.RichFilterFunction
-import org.apache.flink.configuration.Configuration
-import org.apache.flink.streaming.api.TimeCharacteristic
-import org.apache.flink.streaming.api.environment.LocalStreamEnvironment
+import org.apache.flink.configuration.{ConfigOptions, Configuration}
 import org.apache.flink.streaming.api.functions.ProcessFunction
 import org.apache.flink.streaming.api.scala.StreamExecutionEnvironment
-import org.apache.flink.streaming.connectors.kafka.{FlinkKafkaConsumer, FlinkKafkaProducer}
-import org.apache.flink.streaming.util.serialization.SimpleStringSchema
 import org.apache.flink.util.Collector
 import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.flink.streaming.api.scala._
@@ -33,7 +31,6 @@ import scala.collection.mutable
   * @description
   * @update [no][date YYYY-MM-DD][name][description]
   */
-
 
 object MailAbnormal {
   def main(args: Array[String]): Unit = {
@@ -122,33 +119,21 @@ object MailAbnormal {
     //获取ExecutionEnvironment
     val env = StreamExecutionEnvironment.getExecutionEnvironment
 
-
-
     //设置流的时间为ProcessTime
-    env.setStreamTimeCharacteristic(TimeCharacteristic.ProcessingTime)
+    env.getConfig.setAutoWatermarkInterval(0)
     //设置flink全局变量
     env.getConfig.setGlobalJobParameters(parameters)
-
-    //设置kafka消费者相关配置
-    val props = new Properties()
-    //设置kafka集群地址
-    props.setProperty("bootstrap.servers", brokerList)
-    //设置flink消费的group.id
-    props.setProperty("group.id", groupId)
-
 
     val leaderNameSet = readLeaderNameSet(leaderMailPath, fileSystem)
 
     //获取kafka消费者
-    val consumer = new FlinkKafkaConsumer[String](sourceTopic, new SimpleStringSchema, props)
-      .setStartFromGroupOffsets()
+    val consumer = Source.kafkaSource(sourceTopic, groupId, brokerList)
 
     //获取kafka生产者
-    val producer = new FlinkKafkaProducer[String](sinkTopic, new SimpleStringSchema, props)
-
+    val producer = Sink.kafkaSink(brokerList, sinkTopic)
 
     // 获取kafka数据
-    val warnData = env.addSource(consumer).setParallelism(kafkaSourceParallelism)
+    val warnData = env.fromSource(consumer, WatermarkStrategy.noWatermarks(), kafkaSourceName).setParallelism(kafkaSourceParallelism)
       .uid(kafkaSourceName).name(kafkaSourceName)
       .map(JsonUtil.fromJson[MailModel] _).setParallelism(dealParallelism)
       .filter(new LeaderMailFilter(leaderNameSet)).setParallelism(dealParallelism)
@@ -165,15 +150,14 @@ object MailAbnormal {
       .setParallelism(sqlSinkParallelism)
 
     warnData.map(m => JsonUtil.toJson(m._1._1.asInstanceOf[MailAbnormalLoginIpEntity]))
-      .addSink(producer)
+      .sinkTo(producer)
       .uid(kafkaSinkName)
       .name(kafkaSinkName)
       .setParallelism(kafkaSinkParallelism)
 
     //将告警数据写入告警数据库topic
-    val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic,
-      new SimpleStringSchema())
-    alertKafkaValue.addSink(warningProducer).setParallelism(kafkaSinkParallelism)
+    val warningProducer = Sink.kafkaSink(brokerList, warningSinkTopic)
+    alertKafkaValue.sinkTo(warningProducer).setParallelism(kafkaSinkParallelism)
     env.execute(jobName)
 
   }
@@ -194,17 +178,15 @@ object MailAbnormal {
       val globConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
 
 
-      historyLen = globConf.getInteger(Constants.MAIL_LOGIN_ABNORMAL_HISTORY_LENGTH, 0)
-
+      historyLen = globConf.getInteger(ConfigOptions.key(Constants.MAIL_LOGIN_ABNORMAL_HISTORY_LENGTH).intType().defaultValue(0))
       //mail的druid表名
-      val tableName = globConf.getString(Constants.DRUID_MAIL_TABLE_NAME, "")
+      val tableName = globConf.getString(ConfigOptions.key(Constants.DRUID_MAIL_TABLE_NAME).stringType().defaultValue(""))
       //设置druid的broker的host和port
-      DruidUtil.setDruidHostPortSet(globConf.getString(Constants.DRUID_BROKER_HOST_PORT, ""))
+      DruidUtil.setDruidHostPortSet(globConf.getString(ConfigOptions.key(Constants.DRUID_BROKER_HOST_PORT).stringType().defaultValue("")))
       //设置写入druid的时间格式
-      DruidUtil.setTimeFormat(globConf.getString(Constants.DRUID_TIME_FORMAT, ""))
+      DruidUtil.setTimeFormat(globConf.getString(ConfigOptions.key(Constants.DRUID_TIME_FORMAT).stringType().defaultValue("")))
       //设置druid开始的时间
-      DruidUtil.setDateStartTimeStamp(globConf.getLong(Constants.DRUID_DATA_START_TIMESTAMP, 0L))
-
+      DruidUtil.setDateStartTimeStamp(globConf.getLong(ConfigOptions.key(Constants.DRUID_DATA_START_TIMESTAMP).longType().defaultValue(0L)))
 
       //druid中查询该领导的历史使用ip情况
       //      val ipSet = new mutable.HashSet[String]()

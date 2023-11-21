@@ -4,20 +4,20 @@ import java.io.{BufferedReader, InputStreamReader}
 import java.net.{URI, URLDecoder}
 import java.sql.Timestamp
 import java.util.Properties
+
 import cn.ffcs.is.mss.analyzer.bean.BbasXssInjectionWarnValidityEntity
 import cn.ffcs.is.mss.analyzer.druid.model.scala.OperationModel
-import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
+import cn.ffcs.is.mss.analyzer.flink.sink.{MySQLSink, Sink}
+import cn.ffcs.is.mss.analyzer.flink.source.Source
 import cn.ffcs.is.mss.analyzer.utils.GetInputKafkaValue.getInputKafkaValue
 import cn.ffcs.is.mss.analyzer.utils.libInjection.xss.XSSInjectionUtil
 import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties, JedisUtil, JsonUtil, TimeUtil}
-//import com.google.api.client.util.Sleeper
+import org.apache.flink.api.common.eventtime.WatermarkStrategy
+import org.apache.flink.configuration.ConfigOptions
 import org.apache.flink.api.common.functions.RichMapFunction
 import org.apache.flink.configuration.Configuration
-import org.apache.flink.streaming.api.TimeCharacteristic
 import org.apache.flink.streaming.api.functions.ProcessFunction
 import org.apache.flink.streaming.api.scala._
-import org.apache.flink.streaming.connectors.kafka.{FlinkKafkaConsumer, FlinkKafkaProducer}
-import org.apache.flink.streaming.util.serialization.SimpleStringSchema
 import org.apache.flink.util.Collector
 import org.apache.hadoop.fs.{FileSystem, Path}
 import redis.clients.jedis.{Jedis, JedisPool}
@@ -112,27 +112,16 @@ object XssInjectionValidity {
     //env.enableCheckpointing(checkpointInterval)
     //设置flink全局变量
     env.getConfig.setGlobalJobParameters(parameters)
-    env.setStreamTimeCharacteristic(TimeCharacteristic.ProcessingTime)
-
-
-    //设置kafka消费者相关配置
-    val props = new Properties()
-    //设置kafka集群地址
-    props.setProperty("bootstrap.servers", brokerList)
-    //设置flink消费的group.id
-    props.setProperty("group.id", groupId)
+    env.getConfig.setAutoWatermarkInterval(0)
 
     //获取kafka消费者
-    val consumer = new FlinkKafkaConsumer[String](kafkaSourceTopic, new SimpleStringSchema,
-      props).setStartFromGroupOffsets()
+    val consumer = Source.kafkaSource(kafkaSourceTopic, groupId, brokerList)
     //获取kafka生产者
-    val producer = new FlinkKafkaProducer[String](brokerList, kafkaSinkTopic, new
-        SimpleStringSchema())
+    val producer = Sink.kafkaSink(brokerList, kafkaSinkTopic)
     //获取写入告警数据的kafka生产者
-    val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
-        SimpleStringSchema())
+    val warningProducer = Sink.kafkaSink(brokerList, warningSinkTopic)
     // 获取kafka数据
-    val dStream = env.addSource(consumer).setParallelism(kafkaSourceParallelism)
+    val dStream = env.fromSource(consumer, WatermarkStrategy.noWatermarks(), kafkaSourceName).setParallelism(kafkaSourceParallelism)
       .uid(kafkaSourceName).name(kafkaSourceName)
 
     //val dStream = env.readTextFile("/Users/chenwei/Downloads/测试数据/sql注入样例数据(刘东提供)2.txt")
@@ -185,12 +174,12 @@ object XssInjectionValidity {
         JsonUtil.toJson(o._1.asInstanceOf[BbasXssInjectionWarnValidityEntity])
       })
 
-      .addSink(producer)
+      .sinkTo(producer)
       .uid(kafkaSinkName)
       .name(kafkaSinkName)
       .setParallelism(kafkaSinkParallelism)
 
-    alertKafkaValue.addSink(warningProducer).setParallelism(kafkaSinkParallelism)
+    alertKafkaValue.sinkTo(warningProducer).setParallelism(kafkaSinkParallelism)
 
     env.execute(jobName)
 
@@ -208,17 +197,17 @@ object XssInjectionValidity {
     override def open(parameters: Configuration): Unit = {
       val globConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters
         .asInstanceOf[Configuration]
-      val rulePath = globConf.getString(Constants.XSS_INJECTION_VALIDITY_RULE_PATH, "/")
-      val fileSystemType = globConf.getString(Constants.FILE_SYSTEM_TYPE, "/")
-      val RuleHDFSPath = globConf.getString(Constants.XSS_INJECTION_VALIDITY_HDFS_RULE_PATH, "/")
-      val jedisConfigPath = globConf.getString(Constants.REDIS_PACKAGE_PROPERTIES, "")
+      val rulePath = globConf.getString(ConfigOptions.key(Constants.XSS_INJECTION_VALIDITY_RULE_PATH).stringType().defaultValue("/"))
+      val fileSystemType = globConf.getString(ConfigOptions.key(Constants.FILE_SYSTEM_TYPE).stringType().defaultValue("/"))
+      val RuleHDFSPath = globConf.getString(ConfigOptions.key(Constants.XSS_INJECTION_VALIDITY_HDFS_RULE_PATH).stringType().defaultValue("/"))
+      val jedisConfigPath = globConf.getString(ConfigOptions.key(Constants.REDIS_PACKAGE_PROPERTIES).stringType().defaultValue(""))
 
       //      System.load(rulePath)
       xSSInjectionUtil = new XSSInjectionUtil(fileSystemType, RuleHDFSPath, rulePath)
 
-      groupSplit = globConf.getInteger(Constants.XSS_INJECTION_VALIDITY_GROUP_SPLIT, 0).asInstanceOf[Char]
+      groupSplit = globConf.getInteger(ConfigOptions.key(Constants.XSS_INJECTION_VALIDITY_GROUP_SPLIT).intType().defaultValue(0)).asInstanceOf[Char]
+      kvSplit = globConf.getInteger(ConfigOptions.key(Constants.XSS_INJECTION_VALIDITY_KV_SPLIT).intType().defaultValue(0)).asInstanceOf[Char]
 
-      kvSplit = globConf.getInteger(Constants.XSS_INJECTION_VALIDITY_KV_SPLIT, 0).asInstanceOf[Char]
       //online 配置
       //根据redis配置文件,初始化redis连接池
       val redisProperties = new Properties()

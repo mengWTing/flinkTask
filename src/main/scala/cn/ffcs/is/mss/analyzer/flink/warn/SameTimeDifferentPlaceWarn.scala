@@ -2,19 +2,19 @@ package cn.ffcs.is.mss.analyzer.flink.warn
 
 import java.sql.Timestamp
 import java.util.Properties
+
 import cn.ffcs.is.mss.analyzer.bean.BbasSameTimeDifferentPlaceWarnEntity
 import cn.ffcs.is.mss.analyzer.druid.model.scala.OperationModel
-import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
+import cn.ffcs.is.mss.analyzer.flink.sink.{MySQLSink, Sink}
+import cn.ffcs.is.mss.analyzer.flink.source.Source
 import cn.ffcs.is.mss.analyzer.utils.GetInputKafkaValue.getInputKafkaValue
 import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties, JsonUtil, TimeUtil}
 import org.apache.flink.api.common.accumulators.LongCounter
+import org.apache.flink.api.common.eventtime.WatermarkStrategy
 import org.apache.flink.api.common.state.{ValueState, ValueStateDescriptor}
-import org.apache.flink.configuration.Configuration
-import org.apache.flink.streaming.api.TimeCharacteristic
-import org.apache.flink.streaming.api.functions.ProcessFunction
+import org.apache.flink.configuration.{ConfigOptions, Configuration}
+import org.apache.flink.streaming.api.functions.KeyedProcessFunction
 import org.apache.flink.streaming.api.scala._
-import org.apache.flink.streaming.connectors.kafka.{FlinkKafkaConsumer, FlinkKafkaProducer}
-import org.apache.flink.streaming.util.serialization.SimpleStringSchema
 import org.apache.flink.util.Collector
 
 import scala.collection.mutable
@@ -99,24 +99,16 @@ object SameTimeDifferentPlaceWarn {
     //获取ExecutionEnvironment
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     //设置check pointing的间隔
-    env.enableCheckpointing(checkpointInterval)
+//    env.enableCheckpointing(checkpointInterval)
     //设置流的时间为EventTime
-    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
     //设置flink全局变量
     env.getConfig.setGlobalJobParameters(parameters)
 
-    //设置kafka消费者相关配置
-    val props = new Properties()
-    //设置kafka集群地址
-    props.setProperty("bootstrap.servers", brokerList)
-    //设置flink消费的group.id
-    props.setProperty("group.id", groupId)
-
     //获取kafka消费者
-    val consumer = new FlinkKafkaConsumer[String](topic, new SimpleStringSchema, props).setStartFromGroupOffsets()
+    val consumer = Source.kafkaSource(topic, groupId, brokerList)
     // 获取kafka数据
-    val dStream = env.addSource(consumer).setParallelism(kafkaSourceParallelism)
-      .uid(kafkaSourceName).name(kafkaSourceName)
+    val dStream = env.fromSource(consumer, WatermarkStrategy.noWatermarks(), kafkaSourceName).setParallelism(kafkaSourceParallelism)
+          .uid(kafkaSourceName).name(kafkaSourceName)
     //    var path = "/Users/chenwei/Downloads/mss.1525735052963.txt"
     //    path ="/Users/chenwei/Downloads/14021053@HQ/14021053@HQ的副本.txt"
     //    val dStream = env.readTextFile(path, "iso-8859-1")
@@ -154,24 +146,23 @@ object SameTimeDifferentPlaceWarn {
       .setParallelism(sqlSinkParallelism)
 
     //获取kafka的生产者
-    val producer = new FlinkKafkaProducer[String](brokerList, kafkaSinkTopic, new SimpleStringSchema())
-    val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
-        SimpleStringSchema())
+    val producer = Sink.kafkaSink(brokerList, kafkaSinkTopic)
+    val warningProducer = Sink.kafkaSink(brokerList, warningSinkTopic)
 
     value
       .map(o => {
         JsonUtil.toJson(o._1.asInstanceOf[BbasSameTimeDifferentPlaceWarnEntity])
       })
-      .addSink(producer)
+      .sinkTo(producer)
       .uid(kafkaSinkName)
       .setParallelism(kafkaSinkParallelism)
 
-    alertKafkaValue.addSink(warningProducer).setParallelism(sqlSinkParallelism)
+    alertKafkaValue.sinkTo(warningProducer).setParallelism(sqlSinkParallelism)
     env.execute(jobName)
   }
 
 
-  class SameTimeDifferentPlaceWarnDeal extends ProcessFunction[OperationModel, ((Object, Boolean), String)] {
+  class SameTimeDifferentPlaceWarnDeal extends KeyedProcessFunction[String, OperationModel, ((Object, Boolean), String)] {
 
     lazy val firstStage: ValueState[OperationModel] = getRuntimeContext
       .getState(new ValueStateDescriptor[OperationModel]("todayLoginPlaceStage", classOf[OperationModel]))
@@ -197,13 +188,12 @@ object SameTimeDifferentPlaceWarn {
 
       //获取全局配置
       val globConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
-      provinceDeltaTimestamp = globConf.getLong(Constants.SAME_TIME_DIFFERENT_PROVINCE_DELTA_TIMESTAMP, 21600000)
-      cityDeltaTimestamp = globConf.getLong(Constants.SAME_TIME_DIFFERENT_CITY_DELTA_TIMESTAMP, 10800000)
-
+      provinceDeltaTimestamp = globConf.getLong(ConfigOptions.key(Constants.SAME_TIME_DIFFERENT_PROVINCE_DELTA_TIMESTAMP).longType().defaultValue(21600000L))
+      cityDeltaTimestamp = globConf.getLong(ConfigOptions.key(Constants.SAME_TIME_DIFFERENT_CITY_DELTA_TIMESTAMP).longType().defaultValue(10800000L))
     }
 
 
-    override def processElement(value: OperationModel, ctx: ProcessFunction[OperationModel, ((Object, Boolean), String)
+    override def processElement(value: OperationModel, ctx: KeyedProcessFunction[String, OperationModel, ((Object, Boolean), String)
     ]#Context, out: Collector[((Object, Boolean), String)]): Unit = {
 
       messagesReceived.add(1)

@@ -1,20 +1,19 @@
 package cn.ffcs.is.mss.analyzer.flink.warn
 
 import java.sql.Timestamp
+import java.time.Duration
 import java.util.Properties
 
 import cn.ffcs.is.mss.analyzer.bean.DdosWarnEntity
-import cn.ffcs.is.mss.analyzer.druid.model.scala.OperationModel
-import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
+import cn.ffcs.is.mss.analyzer.flink.sink.{MySQLSink, Sink}
+import cn.ffcs.is.mss.analyzer.flink.source.Source
 import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties, JsonUtil}
-import org.apache.flink.configuration.Configuration
-import org.apache.flink.streaming.api.TimeCharacteristic
-import org.apache.flink.streaming.api.functions.{AssignerWithPunctuatedWatermarks, ProcessFunction}
+import org.apache.flink.api.common.eventtime.{SerializableTimestampAssigner, WatermarkStrategy}
+import org.apache.flink.configuration.{ConfigOptions, Configuration}
+import org.apache.flink.streaming.api.functions.ProcessFunction
 import org.apache.flink.streaming.api.scala.StreamExecutionEnvironment
-import org.apache.flink.streaming.connectors.kafka.{FlinkKafkaConsumer, FlinkKafkaProducer}
-import org.apache.flink.streaming.util.serialization.SimpleStringSchema
 import org.apache.flink.streaming.api.scala._
-import org.apache.flink.streaming.api.watermark.Watermark
+import org.apache.flink.streaming.api.windowing.assigners.SlidingEventTimeWindows
 import org.apache.flink.streaming.api.windowing.time.Time
 import org.apache.flink.util.Collector
 
@@ -90,46 +89,33 @@ object HttpGet {
 
     val env = StreamExecutionEnvironment.getExecutionEnvironment
 
-    env.enableCheckpointing(checkpointInterval)
-    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
-
+//    env.enableCheckpointing(checkpointInterval)
     env.getConfig.setGlobalJobParameters(parameters)
 
-
-    //设置kafka消费者相关配置
-    val props = new Properties()
-    //设置kafka集群地址
-    props.setProperty("bootstrap.servers", brokerList)
-    //设置flink消费的group.id
-    props.setProperty("group.id", groupId)
-
     //获取kafka消费者
-    val consumer = new FlinkKafkaConsumer[String](kafkaSourceTopic, new SimpleStringSchema, props)
-      .setStartFromGroupOffsets()
+    val consumer = Source.kafkaSource(kafkaSourceTopic, groupId, brokerList)
 
-    val alertData = env.addSource(consumer).setParallelism(kafkaSourceParallelism)
+    val alertData = env.fromSource(consumer, WatermarkStrategy.noWatermarks(), kafkaSourceName).setParallelism(kafkaSourceParallelism)
       .uid(kafkaSourceName).name(kafkaSourceName)
       .filter(line => {
         val splits = line.split("\\|", -1)
         //refer为空
         splits(8).length == 0 && splits.length > 10
       }).setParallelism(dealParallelism)
-      .assignTimestampsAndWatermarks(new AssignerWithPunctuatedWatermarks[String] {
-        override def
-        checkAndGetNextWatermark(lastElement: String, extractedTimestamp: Long): Watermark = {
-          new Watermark(extractedTimestamp - 10000)
-        }
-
-        override def extractTimestamp(element: String, previousElementTimestamp: Long): Long = {
-          element.split("\\|", -1)(10).trim.toLong
-        }
-      })
+      .assignTimestampsAndWatermarks(
+        WatermarkStrategy.forBoundedOutOfOrderness[String](Duration.ofSeconds(10))
+          .withTimestampAssigner(new SerializableTimestampAssigner[String] {
+            override def extractTimestamp(element: String, recordTimestamp: Long): Long = {
+              element.split("\\|", -1)(10).trim.toLong
+            }
+          })
+      )
       .map(line => {
         val splits = line.split("\\|", -1)
         (splits(10).trim.toLong / 1000 / 60 * 1000 * 60 + "|" + splits(1), splits(3), 1)
       })
-      .keyBy(0)
-      .timeWindow(Time.minutes(1), Time.minutes(1))
+      .keyBy(_._1)
+      .window(SlidingEventTimeWindows.of(Time.minutes(1), Time.minutes(1)))
       .reduce((o1, o2) => {
         (o1._1, o2._2, o1._3 + o2._3)
       })
@@ -143,20 +129,19 @@ object HttpGet {
       .setParallelism(sqlSinkParallelism)
 
     //获取kafka生产者
-    val producer = new FlinkKafkaProducer[String](brokerList, kafkaSinkTopic, new SimpleStringSchema())
+    val producer = Sink.kafkaSink(brokerList, kafkaSinkTopic)
     alertData.map(m => {
       JsonUtil.toJson(m._1._1.asInstanceOf[DdosWarnEntity])
     })
-      .addSink(producer)
+      .sinkTo(producer)
       .uid(kafkaSinkName)
       .name(kafkaSinkName)
       .setParallelism(kafkaSinkParallelism)
 
 
     //将告警数据写入告警库topic
-    val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
-        SimpleStringSchema())
-    alertKafkaValue.addSink(warningProducer).setParallelism(kafkaSinkParallelism)
+    val warningProducer = Sink.kafkaSink(brokerList, warningSinkTopic)
+    alertKafkaValue.sinkTo(warningProducer).setParallelism(kafkaSinkParallelism)
     env.execute(jobName)
 
 
@@ -168,7 +153,7 @@ object HttpGet {
 
     override def open(parameters: Configuration): Unit = {
       val globConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
-      threshold = globConf.getInteger(Constants.DDOS_HTTP_GET_DETECT_THRESHOLD, 0)
+      threshold = globConf.getInteger(ConfigOptions.key(Constants.DDOS_HTTP_GET_DETECT_THRESHOLD).intType().defaultValue(0))
     }
 
 

@@ -15,12 +15,13 @@ import java.util.Properties
 
 import cn.ffcs.is.mss.analyzer.bean.BbasDirectoryTraversalWarnEntity
 import cn.ffcs.is.mss.analyzer.druid.model.scala.OperationModel
-import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
+import cn.ffcs.is.mss.analyzer.flink.sink.{MySQLSink, Sink}
+import cn.ffcs.is.mss.analyzer.flink.source.Source
 import cn.ffcs.is.mss.analyzer.ml.tree.{CART, DecisionTreeNode}
 import cn.ffcs.is.mss.analyzer.ml.utils.MlUtil
 import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties, JsonUtil}
-import org.apache.flink.configuration.Configuration
-import org.apache.flink.streaming.api.TimeCharacteristic
+import org.apache.flink.api.common.eventtime.WatermarkStrategy
+import org.apache.flink.configuration.{ConfigOptions, Configuration}
 import org.apache.flink.streaming.api.functions.ProcessFunction
 import org.apache.flink.streaming.api.scala._
 import org.apache.flink.streaming.connectors.kafka.{FlinkKafkaConsumer, FlinkKafkaProducer}
@@ -122,23 +123,14 @@ object DirectoryTraversalWarn {
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     //设置check pointing的间隔
 //    env.enableCheckpointing(checkpointInterval)
-    //设置流的时间为EventTime
-    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
     //设置flink全局变量
     env.getConfig.setGlobalJobParameters(parameters)
 
-    //设置kafka消费者相关配置
-    val props = new Properties()
-    //设置kafka集群地址
-    props.setProperty("bootstrap.servers", brokerList)
-    //设置flink消费的group.id
-    props.setProperty("group.id", groupId)
-
     //获取kafka消费者
-    val consumer = new FlinkKafkaConsumer[String](sourceTopic, new SimpleStringSchema, props)
-      .setStartFromGroupOffsets()
+    val consumer = Source.kafkaSource(sourceTopic, groupId, brokerList)
+
     // 获取kafka数据
-    val dStream = env.addSource(consumer).setParallelism(kafkaSourceParallelism)
+    val dStream = env.fromSource(consumer, WatermarkStrategy.noWatermarks(), kafkaSourceName).setParallelism(kafkaSourceParallelism)
       .uid(kafkaSourceName).name(kafkaSourceName)
 
     val directoryTraversalStream = dStream.process(new DetectionDirectoryTraversal)
@@ -152,17 +144,16 @@ object DirectoryTraversalWarn {
       .setParallelism(sqlSinkParallelism)
 
     //获取kafka生产者
-    val producer = new FlinkKafkaProducer[String](brokerList, sinkTopic, new SimpleStringSchema())
+    val producer = Sink.kafkaSink(brokerList, sinkTopic)
     directoryTraversalStream.map(o => JsonUtil.toJson(o._1._1.asInstanceOf[BbasDirectoryTraversalWarnEntity]))
-      .addSink(producer)
+      .sinkTo(producer)
       .uid(kafkaSinkName)
       .name(kafkaSinkName)
       .setParallelism(kafkaSinkParallelism)
 
     //将告警数据写入告警库topic
-    val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
-        SimpleStringSchema())
-    alertKafkaValue.addSink(warningProducer).setParallelism(kafkaSinkParallelism)
+    val warningProducer = Sink.kafkaSink(brokerList, warningSinkTopic)
+    alertKafkaValue.sinkTo(warningProducer).setParallelism(kafkaSinkParallelism)
 
     env.execute(jobName)
   }
@@ -182,16 +173,16 @@ object DirectoryTraversalWarn {
         .asInstanceOf[Configuration]
 
       //训练数据路径
-      val trainDataPath = globConf.getString(Constants.DIRECTORY_TRAVERSAL_TRAIN_DATA_PATH, "")
-      val fileSystemType = globConf.getString(Constants.FILE_SYSTEM_TYPE, "file://")
+      val trainDataPath = globConf.getString(ConfigOptions.key(Constants.DIRECTORY_TRAVERSAL_TRAIN_DATA_PATH).stringType().defaultValue(""))
+      val fileSystemType = globConf.getString(ConfigOptions.key(Constants.FILE_SYSTEM_TYPE).stringType().defaultValue("file://"))
 
       //ip-地点关联文件路径
-      OperationModel.setPlaceMap(globConf.getString(Constants.OPERATION_PLACE_PATH, ""))
+        OperationModel.setPlaceMap(globConf.getString(ConfigOptions.key(Constants.OPERATION_PLACE_PATH).stringType().defaultValue("")))
       //host-系统名关联文件路径
-      OperationModel.setSystemMap(globConf.getString(Constants.OPERATION_SYSTEM_PATH, ""))
-      OperationModel.setMajorMap(globConf.getString(Constants.OPERATION_SYSTEM_PATH, ""))
+      OperationModel.setSystemMap(globConf.getString(ConfigOptions.key(Constants.OPERATION_SYSTEM_PATH).stringType().defaultValue("")))
+      OperationModel.setMajorMap(globConf.getString(ConfigOptions.key(Constants.OPERATION_SYSTEM_PATH).stringType().defaultValue("")))
       //用户名-常用登录地关联文件路径
-      OperationModel.setUsedPlacesMap(globConf.getString(Constants.OPERATION_USEDPLACE_PATH, ""))
+      OperationModel.setUsedPlacesMap(globConf.getString(ConfigOptions.key(Constants.OPERATION_USEDPLACE_PATH).stringType().defaultValue("")))
 
       //保存样本和标记
       val targetArrayList = ArrayBuffer[String]()

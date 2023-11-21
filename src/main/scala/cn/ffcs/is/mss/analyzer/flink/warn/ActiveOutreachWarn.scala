@@ -7,15 +7,15 @@ import java.util.Properties
 
 import cn.ffcs.is.mss.analyzer.bean.ActiveOutreachWarnEntity
 import cn.ffcs.is.mss.analyzer.druid.model.scala.QuintetModel
-import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
+import cn.ffcs.is.mss.analyzer.flink.sink.{MySQLSink, Sink}
+import cn.ffcs.is.mss.analyzer.flink.source.Source
 import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties, JsonUtil}
 import org.apache.flink.api.common.accumulators.LongCounter
+import org.apache.flink.api.common.eventtime.WatermarkStrategy
 import org.apache.flink.api.common.functions.RichFilterFunction
-import org.apache.flink.configuration.Configuration
+import org.apache.flink.configuration.{ConfigOptions, Configuration}
 import org.apache.flink.streaming.api.functions.ProcessFunction
 import org.apache.flink.streaming.api.scala.{StreamExecutionEnvironment, _}
-import org.apache.flink.streaming.connectors.kafka.{FlinkKafkaConsumer, FlinkKafkaProducer}
-import org.apache.flink.streaming.util.serialization.SimpleStringSchema
 import org.apache.flink.util.Collector
 import org.apache.hadoop.fs.{FileSystem, Path}
 
@@ -30,7 +30,10 @@ import scala.collection.mutable
  */
 object ActiveOutreachWarn {
   def main(args: Array[String]): Unit = {
-    val confProperties = new IniProperties(args(0))
+    //根据传入的参数解析配置文件
+        val args0 = "G:\\ffcs\\4_Code\\mss\\src\\main\\resources\\flink.ini"
+        val confProperties = new IniProperties(args0)
+//    val confProperties = new IniProperties(args(0))
     //任务的名字
     val jobName = confProperties.getValue(Constants.ACTIVE_OUTREACH_ANALYZE_CONFIG, Constants
       .ACTIVE_OUTREACH_ANALYZE_JOB_NAME)
@@ -94,27 +97,20 @@ object ActiveOutreachWarn {
     parameters.setString(Constants.ACTIVE_OUTREACH_ANALYZE_SPECIAL_IP, confProperties.getValue(Constants.
       ACTIVE_OUTREACH_ANALYZE_CONFIG, Constants.ACTIVE_OUTREACH_ANALYZE_SPECIAL_IP))
 
-
-    //设置kafka消费者相关配置
-    //设置kafka消费者相关配置
-    val props = new Properties()
-    //设置kafka集群地址
-    props.setProperty("bootstrap.servers", brokerList)
-    //设置flink消费的group.id
-    props.setProperty("group.id", groupId + "test")
     //获取kafka消费者
-    val consumer = new FlinkKafkaConsumer[String](topic, new SimpleStringSchema, props)
-      .setStartFromLatest()
+    val consumer = Source.kafkaSource(topic, groupId, brokerList)
     //获取kafka 生产者
-    val producer = new FlinkKafkaProducer[String](brokerList, kafkaSinkTopic, new SimpleStringSchema())
+    val producer = Sink.kafkaSink(brokerList, kafkaSinkTopic)
 
     //获取ExecutionEnvironment
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     //设置check pointing的间隔
-    env.enableCheckpointing(checkpointInterval)
+//    env.enableCheckpointing(checkpointInterval)
     //设置flink全局变量
     env.getConfig.setGlobalJobParameters(parameters)
-    val sinkData = env.addSource(consumer).setParallelism(sourceParallelism)
+    env.getConfig.setAutoWatermarkInterval(0)
+
+    val sinkData = env.fromSource(consumer, WatermarkStrategy.noWatermarks(), "kafkaSource").setParallelism(sourceParallelism)
       .map(JsonUtil.fromJson[QuintetModel] _).setParallelism(dealParallelism)
       .filter(new RichFilterFunction[QuintetModel] {
         override def filter(value: QuintetModel): Boolean = {
@@ -132,12 +128,11 @@ object ActiveOutreachWarn {
       .map(o => {
         JsonUtil.toJson(o._1.asInstanceOf[ActiveOutreachWarnEntity])
       })
-      .addSink(producer)
+      .sinkTo(producer)
       .setParallelism(kafkaSinkParallelism)
 
     //将告警数据写入告警库topic
-    val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
-        SimpleStringSchema())
+      val warningProducer = Sink.kafkaSink(brokerList, warningSinkTopic)
 
     sinkData.map(m => {
       var inPutKafkaValue = ""
@@ -153,7 +148,7 @@ object ActiveOutreachWarn {
         }
       }
       inPutKafkaValue
-    }).addSink(warningProducer).setParallelism(sinkParallelism)
+    }).sinkTo(warningProducer).setParallelism(sinkParallelism)
 
     env.execute(jobName)
 
@@ -198,12 +193,14 @@ object ActiveOutreachWarn {
 
     override def open(parameters: Configuration): Unit = {
       val globConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
-      portWhiteList = globConf.getString(Constants.ACTIVE_OUTREACH_ANALYZE_PORT_WHITE_LIST, "")
-      ipWhiteListPlath = globConf.getString(Constants.ACTIVE_OUTREACH_ANALYZE_IP_WHITE_LIST, "")
-      officePlaceListPlath = globConf.getString(Constants.ACTIVE_OUTREACH_ANALYZE_OFFICE_IP, "")
-      specialIp = globConf.getString(Constants.ACTIVE_OUTREACH_ANALYZE_SPECIAL_IP, "")
 
-      val systemType = globConf.getString(Constants.FILE_SYSTEM_TYPE, "")
+      portWhiteList = globConf.getString(ConfigOptions.key(Constants.ACTIVE_OUTREACH_ANALYZE_PORT_WHITE_LIST).stringType().defaultValue(""))
+      ipWhiteListPlath = globConf.getString(ConfigOptions.key(Constants.ACTIVE_OUTREACH_ANALYZE_IP_WHITE_LIST).stringType().defaultValue(""))
+      officePlaceListPlath = globConf.getString(ConfigOptions.key(Constants.ACTIVE_OUTREACH_ANALYZE_OFFICE_IP).stringType().defaultValue(""))
+      specialIp = globConf.getString(ConfigOptions.key(Constants.ACTIVE_OUTREACH_ANALYZE_SPECIAL_IP).stringType().defaultValue(""))
+
+      val systemType = globConf.getString(ConfigOptions.key(Constants.FILE_SYSTEM_TYPE).stringType().defaultValue(""))
+
       val fs = FileSystem.get(URI.create(systemType), new org.apache.hadoop.conf.Configuration())
 
       val fsDataInputStream = fs.open(new Path(ipWhiteListPlath))

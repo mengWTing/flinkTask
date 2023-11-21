@@ -172,29 +172,3 @@ object PackageAnalyzeToRedis {
 
 }
 
-//  class RedisSinkExample() extends RedisMapper[Array[String]] {
-//    override def getCommandDescription: RedisCommandDescription = {
-//      new RedisCommandDescription(RedisCommand.HSET, "pakage")
-//    }
-//
-//    override def getKeyFromData(t: Array[String]): String = {
-//      t(0)
-//    }
-//
-//    override def getValueFromData(t: Array[String]): String = {
-//      t(1)
-//    }
-//  }
-//
-//  class DataToArrayFuncation() extends ProcessFunction[String, Array[String]] {
-//    override def processElement(value: String, ctx: ProcessFunction[String, Array[String]]#Context,
-//                                out: Collector[Array[String]]): Unit = {
-//      val keyAndValue: Array[String] = value.split("\\|", 2)
-//      if (keyAndValue.length == 2 && keyAndValue(0).contains("txt")) {
-//        out.collect(keyAndValue)
-//      }
-//
-//    }
-//  }
-
-

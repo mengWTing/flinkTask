@@ -1,26 +1,24 @@
 package cn.ffcs.is.mss.analyzer.flink.warn
 
 import java.sql.Timestamp
+import java.time.Duration
 import java.util.Properties
+
 import cn.ffcs.is.mss.analyzer.bean.CrawlerWarningEntity
 import cn.ffcs.is.mss.analyzer.druid.model.scala.OperationModel
-import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
+import cn.ffcs.is.mss.analyzer.flink.sink.{MySQLSink, Sink}
+import cn.ffcs.is.mss.analyzer.flink.source.Source
 import cn.ffcs.is.mss.analyzer.utils.GetInputKafkaValue.getInputKafkaValue
 import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties, JsonUtil}
 import org.apache.flink.api.common.accumulators.LongCounter
+import org.apache.flink.api.common.eventtime.{SerializableTimestampAssigner, WatermarkStrategy}
 import org.apache.flink.api.common.functions.{RichFilterFunction, RichMapFunction}
 import org.apache.flink.api.common.state.{ValueState, ValueStateDescriptor}
-import org.apache.flink.configuration.Configuration
-import org.apache.flink.streaming.api.TimeCharacteristic
-import org.apache.flink.streaming.api.datastream.DataStreamSink
-import org.apache.flink.streaming.api.functions.{AssignerWithPunctuatedWatermarks, ProcessFunction}
+import org.apache.flink.configuration.{ConfigOptions, Configuration}
+import org.apache.flink.streaming.api.functions.KeyedProcessFunction
 import org.apache.flink.streaming.api.scala.StreamExecutionEnvironment
 import org.apache.flink.util.Collector
 import org.apache.flink.streaming.api.scala._
-import org.apache.flink.streaming.api.watermark.Watermark
-import org.apache.flink.streaming.connectors.kafka.{FlinkKafkaConsumer, FlinkKafkaProducer}
-import org.apache.flink.streaming.util.serialization.SimpleStringSchema
-import org.apache.kafka.common.metrics.stats.Histogram.ConstantBinScheme
 
 import scala.collection.mutable
 
@@ -29,8 +27,8 @@ import scala.collection.mutable
  */
 object CrawlerDetect {
   def main(args: Array[String]): Unit = {
-    //        val args0 = "E:\\ffcs\\mss\\src\\main\\resources\\flink.ini";
-    //        val confProperties = new IniProperties(args0)
+//            val args0 = "G:\\ffcs\\4_Code\\mss\\src\\main\\resources\\flink.ini"
+//            val confProperties = new IniProperties(args0)
 
     val confProperties = new IniProperties(args(0))
 
@@ -109,20 +107,9 @@ object CrawlerDetect {
     //获取ExecutionEnvironment
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     //设置check pointing的间隔
-    env.enableCheckpointing(checkpointInterval)
-    //设置流的时间为EventTime
-    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
+//    env.enableCheckpointing(checkpointInterval)
     //设置flink全局变量
     env.getConfig.setGlobalJobParameters(parameters)
-
-    //设置kafka消费者相关配置
-    val props = new Properties()
-    //设置kafka集群地址
-    props.setProperty("bootstrap.servers", brokerList)
-    //设置flink消费的group.id
-    props.setProperty("group.id", groupId)
-
-
 
     //        OperationModel.setPlaceMap("E:\\ffcs\\mss\\src\\main\\resources\\place简化地址.txt")
     //        OperationModel.setSystemMap("E:\\ffcs\\mss\\src\\main\\resources\\system.txt")
@@ -132,17 +119,13 @@ object CrawlerDetect {
     //        val streamData = env.socketTextStream("192.168.1.106", 5555)
 
     //获取消费者
-    val consumer = new FlinkKafkaConsumer[String](topic, new SimpleStringSchema, props).setStartFromLatest()
-
+    val consumer = Source.kafkaSource(topic, groupId, brokerList)
     //获取kafka的生产者
-    val producer = new FlinkKafkaProducer[String](brokerList, kafkaSinkTopic, new SimpleStringSchema())
-    val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
-        SimpleStringSchema())
-
+    val producer = Sink.kafkaSink(brokerList, kafkaSinkTopic)
+    val warningProducer = Sink.kafkaSink(brokerList, warningSinkTopic)
     //获取kafka数据
-    val streamData = env.addSource(consumer).setParallelism(kafkaSourceParallelism)
-      .uid(kafkaSourceName).name(kafkaSourceName)
-
+    val streamData = env.fromSource(consumer, WatermarkStrategy.noWatermarks(), kafkaSourceName).setParallelism(kafkaSourceParallelism)
+        .uid(kafkaSourceName).name(kafkaSourceName)
 
     val sinkData = streamData
       //            .map(OperationModel.getOperationModel _)
@@ -182,8 +165,9 @@ object CrawlerDetect {
 
         override def open(parameters: Configuration): Unit = {
           val globalConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
-          val filterKeys = globalConf.getString(Constants.CRAWLER_DETECT_FILTER_KEY, "")
-          val robotUrls = globalConf.getString(Constants.CRAWLER_DETECT_ROBOT_URL, "")
+          val filterKeys = globalConf.getString(ConfigOptions.key(Constants.CRAWLER_DETECT_FILTER_KEY).stringType().defaultValue(""))
+          val robotUrls = globalConf.getString(ConfigOptions.key(Constants.CRAWLER_DETECT_ROBOT_URL).stringType().defaultValue(""))
+
           val keys = filterKeys.split("\\|")
           for (i <- keys) {
             keySet.add(i)
@@ -193,7 +177,7 @@ object CrawlerDetect {
             urlSet.add(i)
           }
         }
-
+//
         override def filter(tuple: (OperationModel, String)): Boolean = {
 
           val words = tuple._2.reverse.split("\\.", 2)
@@ -204,23 +188,14 @@ object CrawlerDetect {
         }
       }).setParallelism(dealParallelism)
       .map(_._1).setParallelism(dealParallelism)
-      .assignTimestampsAndWatermarks(new AssignerWithPunctuatedWatermarks[OperationModel] {
-        var lastMaxTimestamp: Long = Long.MinValue
-
-        override def checkAndGetNextWatermark(lastElement: OperationModel, extractedTimestamp: Long): Watermark = {
-          val timestamp = lastElement.timeStamp - 10000
-          if (timestamp > lastMaxTimestamp) {
-            lastMaxTimestamp = timestamp
-            new Watermark(lastMaxTimestamp)
-          } else {
-            null
-          }
-        }
-
-
-        override def extractTimestamp(element: OperationModel, previousElementTimestamp: Long): Long =
-          element.timeStamp
-      }).setParallelism(dealParallelism)
+      .assignTimestampsAndWatermarks(
+        WatermarkStrategy.forBoundedOutOfOrderness[OperationModel](Duration.ofSeconds(10))
+          .withTimestampAssigner(new SerializableTimestampAssigner[OperationModel] {
+            override def extractTimestamp(element: OperationModel, recordTimestamp: Long): Long = {
+              element.timeStamp
+            }
+          })
+      ).setParallelism(dealParallelism)
       .keyBy(_.userName)
       .process(new DetectCrawlerFunction).setParallelism(dealParallelism)
 
@@ -234,17 +209,17 @@ object CrawlerDetect {
       .map(o => {
         JsonUtil.toJson(o._1.asInstanceOf[CrawlerWarningEntity])
       })
-      .addSink(producer)
+      .sinkTo(producer)
       .uid(kafkaSinkName)
       .setParallelism(kafkaSinkParallelism)
 
-    alertKafkaValue.addSink(warningProducer).setParallelism(kafkaSinkParallelism)
+    alertKafkaValue.sinkTo(warningProducer).setParallelism(kafkaSinkParallelism)
 
     env.execute(jobName)
   }
 
 
-  class DetectCrawlerFunction extends ProcessFunction[OperationModel, ((Object, Boolean), String)] {
+  class DetectCrawlerFunction extends KeyedProcessFunction[String, OperationModel, ((Object, Boolean), String)] {
 
     //记录这一用户第一次操作
     lazy val firstOperation: ValueState[OperationModel] = getRuntimeContext
@@ -281,12 +256,11 @@ object CrawlerDetect {
       getRuntimeContext.addAccumulator("DetectCrawlerFunction: Messages send", messagesSend)
       //全局配置
       val globalConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
-      allowTime = globalConf.getLong(Constants.CRAWLER_DETECT_ONLINE_TIME_ALLOW, 0L)
-      decideTime = globalConf.getLong(Constants.CRAWLER_DETECT_ONLINE_TIME_DECIDE, 0L)
-
+      allowTime = globalConf.getLong(ConfigOptions.key(Constants.CRAWLER_DETECT_ONLINE_TIME_ALLOW).longType().defaultValue(0L))
+      decideTime = globalConf.getLong(ConfigOptions.key(Constants.CRAWLER_DETECT_ONLINE_TIME_DECIDE).longType().defaultValue(0L))
     }
 
-    override def onTimer(timestamp: Long, ctx: ProcessFunction[OperationModel, ((Object, Boolean), String)]#OnTimerContext,
+    override def onTimer(timestamp: Long, ctx: KeyedProcessFunction[String, OperationModel, ((Object, Boolean), String)]#OnTimerContext,
                          out: Collector[((Object, Boolean), String)]): Unit = {
       val last = lastOperation.value()
       if (last != null) {
@@ -303,8 +277,8 @@ object CrawlerDetect {
       }
     }
 
-    override def processElement(i: OperationModel, context: ProcessFunction[OperationModel, ((Object, Boolean), String)
-    ]#Context, collector: Collector[((Object, Boolean), String)]): Unit = {
+    override def processElement(i: OperationModel, context: KeyedProcessFunction[String, OperationModel, ((Object, Boolean), String)]
+      #Context, collector: Collector[((Object, Boolean), String)]): Unit = {
       messagesReceived.add(1)
       //设置定时器.........在大于设定的许可时间后,执行定时器
       val currentTime = i.timeStamp
@@ -376,10 +350,7 @@ object CrawlerDetect {
           }
         }
       }
-
     }
   }
-
-
 }
 

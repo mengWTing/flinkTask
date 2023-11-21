@@ -2,21 +2,22 @@ package cn.ffcs.is.mss.analyzer.flink.warn
 
 import cn.ffcs.is.mss.analyzer.bean.AbnormalFlownWarnEntity
 import cn.ffcs.is.mss.analyzer.druid.model.scala.OperationModel
-import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
+import cn.ffcs.is.mss.analyzer.flink.sink.{MySQLSink, Sink}
 import cn.ffcs.is.mss.analyzer.utils._
 import cn.ffcs.is.mss.analyzer.utils.druid.entity._
-import org.apache.flink.configuration.Configuration
-import org.apache.flink.streaming.api.TimeCharacteristic
-import org.apache.flink.streaming.api.functions.{AssignerWithPunctuatedWatermarks, ProcessFunction}
+import org.apache.flink.configuration.{ConfigOptions, Configuration}
+import org.apache.flink.streaming.api.functions.ProcessFunction
 import org.apache.flink.streaming.api.scala.{StreamExecutionEnvironment, _}
-import org.apache.flink.streaming.api.watermark.Watermark
 import org.apache.flink.streaming.api.windowing.time.Time
-import org.apache.flink.streaming.connectors.kafka.{FlinkKafkaConsumer, FlinkKafkaProducer}
-import org.apache.flink.streaming.util.serialization.SimpleStringSchema
 import org.apache.flink.util.Collector
-
 import java.sql.Timestamp
+import java.time.Duration
 import java.util.{Date, Properties}
+
+import cn.ffcs.is.mss.analyzer.flink.source.Source
+import org.apache.flink.api.common.eventtime.{SerializableTimestampAssigner, WatermarkStrategy}
+import org.apache.flink.streaming.api.windowing.assigners.SlidingEventTimeWindows
+
 import scala.collection.JavaConversions._
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
@@ -30,8 +31,8 @@ import scala.collection.mutable.ArrayBuffer
 object AbnormalFlowWarn {
   def main(args: Array[String]): Unit = {
     //根据传入的参数解析配置文件
-    //    val args0 = "E:\\ffcs\\mss\\src\\main\\resources\\flink.ini"
-    //    val confProperties = new IniProperties(args0)
+//        val args0 = "G:\\ffcs\\4_Code\\mss\\src\\main\\resources\\flink.ini"
+//        val confProperties = new IniProperties(args0)
     val confProperties = new IniProperties(args(0))
 
     //该任务的名字
@@ -110,46 +111,33 @@ object AbnormalFlowWarn {
     //获取ExecutionEnvironment
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     //设置check pointing的间隔
-    env.enableCheckpointing(checkpointInterval)
-    //设置flink时间
-    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
+//    env.enableCheckpointing(checkpointInterval)
     //设置flink全局变量
     env.getConfig.setGlobalJobParameters(parameters)
 
-    //设置kafka消费者相关配置
-    val props = new Properties
-    props.setProperty("bootstrap.servers", brokerList)
-    props.setProperty("group.id", groupId)
-
     //获取kafka消费者
-    val consumer = new FlinkKafkaConsumer[String](kafkaSourceTopic, new SimpleStringSchema, props)
-      .setStartFromGroupOffsets()
+    val consumer = Source.kafkaSource(kafkaSourceTopic, groupId, brokerList)
     //获取kafka生产者
-    val producer = new FlinkKafkaProducer[String](kafkaSinkTopic, new SimpleStringSchema, props)
-
+    val producer = Sink.kafkaSink(brokerList, kafkaSinkTopic)
     //将告警数据写入告警库topic
-    val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
-        SimpleStringSchema())
+    val warningProducer = Sink.kafkaSink(brokerList, warningSinkTopic)
 
-    val alertData = env.addSource(consumer).setParallelism(kafkaSourceParallelism)
+    val alertData = env.fromSource(consumer, WatermarkStrategy.noWatermarks(), kafkaSourceName).setParallelism(kafkaSourceParallelism)
       .uid(kafkaSourceName).name(kafkaSourceName)
       .map(JsonUtil.fromJson[OperationModel] _).setParallelism(dealParallelism)
       .filter(_.userName != "匿名用户").setParallelism(dealParallelism)
-      .assignTimestampsAndWatermarks(new AssignerWithPunctuatedWatermarks[OperationModel] {
-        override def
-        checkAndGetNextWatermark(lastElement: OperationModel, extractedTimestamp: Long): Watermark = {
-          new Watermark(extractedTimestamp - 10000)
-        }
-
-        override def extractTimestamp(element: OperationModel, previousElementTimestamp: Long): Long = {
-          element.timeStamp
-        }
-      }).setParallelism(dealParallelism)
+    .assignTimestampsAndWatermarks(
+      WatermarkStrategy.forBoundedOutOfOrderness[OperationModel](Duration.ofSeconds(10))
+        .withTimestampAssigner(new SerializableTimestampAssigner[OperationModel] {
+          override def extractTimestamp(element: OperationModel, recordTimestamp: Long): Long =
+            element.timeStamp
+        })
+    ).setParallelism(dealParallelism)
       .map(model => (model.timeStamp / 1000 / 60 * 1000 * 60 + "|" + model.userName, model.inputOctets, model
         .outputOctets, model.sourceIp, model.destinationIp))
       .setParallelism(dealParallelism)
-      .keyBy(0)
-      .timeWindow(Time.minutes(1), Time.minutes(1))
+      .keyBy(x => x._1)
+      .window(SlidingEventTimeWindows.of(Time.minutes(1), Time.minutes(1)))
       .reduce((o1, o2) => (o2._1, o1._2 + o2._2, o1._3 + o2._3, o2._4, o2._5))
       .process(new FlowDetectProcess).setParallelism(dealParallelism)
 
@@ -161,12 +149,12 @@ object AbnormalFlowWarn {
       .setParallelism(sqlSinkParallelism)
 
     alertData.map(m => JsonUtil.toJson(m._1._1.asInstanceOf[AbnormalFlownWarnEntity])).setParallelism(dealParallelism)
-      .addSink(producer)
+      .sinkTo(producer)
       .uid(kafkaSinkName)
       .name(kafkaSinkName)
       .setParallelism(kafkaSinkParallelism)
 
-  alertKafkaValue.addSink(warningProducer).setParallelism(kafkaSinkParallelism)
+  alertKafkaValue.sinkTo(warningProducer).setParallelism(kafkaSinkParallelism)
   //alertKafkaValue.print()
 
     env.execute(jobName)
@@ -196,21 +184,20 @@ object AbnormalFlowWarn {
     override def open(parameters: Configuration): Unit = {
       val globConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
 
-      historyLen = globConf.getInteger(Constants.FLINK_ABNORMAL_FLOW_STATISTICS_LENGTH, 0)
-      thresholdRatio = globConf.getDouble(Constants.FLINK_ABNORMAL_FLOW_THRESHOLD_RATIO, 0.0)
-      baseCount = globConf.getLong(Constants.FLINK_ABNORMAL_FLOW_BASE_COUNT, 0L)
+      historyLen = globConf.getInteger(ConfigOptions.key(Constants.FLINK_ABNORMAL_FLOW_STATISTICS_LENGTH).intType().defaultValue(0))
+      thresholdRatio = globConf.getDouble(ConfigOptions.key(Constants.FLINK_ABNORMAL_FLOW_THRESHOLD_RATIO).doubleType().defaultValue(0.0))
+      baseCount = globConf.getLong(ConfigOptions.key(Constants.FLINK_ABNORMAL_FLOW_BASE_COUNT).longType().defaultValue(0L))
 
       aggregationSet.add(Aggregation.inputOctets)
       aggregationSet.add(Aggregation.outputOctets)
 
-      tableName = globConf.getString(Constants.DRUID_OPERATION_TABLE_NAME, "")
+      tableName = globConf.getString(ConfigOptions.key(Constants.DRUID_OPERATION_TABLE_NAME).stringType().defaultValue(""))
       //设置druid的broker的host和port
-      DruidUtil.setDruidHostPortSet(globConf.getString(Constants.DRUID_BROKER_HOST_PORT, ""))
+      DruidUtil.setDruidHostPortSet(globConf.getString(ConfigOptions.key(Constants.DRUID_BROKER_HOST_PORT).stringType().defaultValue("")))
       //设置写入druid的时间格式
-      DruidUtil.setTimeFormat(globConf.getString(Constants.DRUID_TIME_FORMAT, ""))
+      DruidUtil.setTimeFormat(globConf.getString(ConfigOptions.key(Constants.DRUID_TIME_FORMAT).stringType().defaultValue("")))
       //设置druid开始的时间
-      DruidUtil.setDateStartTimeStamp(globConf.getLong(Constants.DRUID_DATA_START_TIMESTAMP, 0L))
-
+      DruidUtil.setDateStartTimeStamp(globConf.getLong(ConfigOptions.key(Constants.DRUID_DATA_START_TIMESTAMP).longType().defaultValue(0L)))
       val date = new Date
 
       val endTimestamp = TimeUtil.getDayStartTime(date.getTime)

@@ -1,21 +1,23 @@
 package cn.ffcs.is.mss.analyzer.flink.webbuganalyse
 
+import java.net.URLDecoder
 import java.sql.Timestamp
+import java.time.Duration
 import java.util.Properties
 
-import cn.ffcs.is.mss.analyzer.bean.PermeateSoftwareFlowWarnEntity
-import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
+import cn.ffcs.is.mss.analyzer.bean.{AntSwordWarnEntity, PermeateSoftwareFlowWarnEntity}
+import cn.ffcs.is.mss.analyzer.druid.model.scala.OperationModel
+import cn.ffcs.is.mss.analyzer.flink.sink.{MySQLSink, Sink}
+import cn.ffcs.is.mss.analyzer.flink.source.Source
 import cn.ffcs.is.mss.analyzer.flink.webbuganalyse.utils.EnglishOrCode
-import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties, KeLaiTimeUtils}
+import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties, JsonUtil, KeLaiTimeUtils}
+import org.apache.flink.api.common.eventtime.{SerializableTimestampAssigner, WatermarkStrategy}
 import org.apache.flink.api.common.functions.{RichFlatMapFunction, RichMapFunction}
-import org.apache.flink.configuration.Configuration
-import org.apache.flink.streaming.api.TimeCharacteristic
-import org.apache.flink.streaming.api.functions.{AssignerWithPunctuatedWatermarks, ProcessFunction}
+import org.apache.flink.configuration.{ConfigOptions, Configuration}
+import org.apache.flink.streaming.api.functions.ProcessFunction
 import org.apache.flink.streaming.api.scala.{StreamExecutionEnvironment, _}
-import org.apache.flink.streaming.api.watermark.Watermark
+import org.apache.flink.streaming.api.windowing.assigners.SlidingEventTimeWindows
 import org.apache.flink.streaming.api.windowing.time.Time
-import org.apache.flink.streaming.connectors.kafka.{FlinkKafkaConsumer, FlinkKafkaProducer}
-import org.apache.flink.streaming.util.serialization.SimpleStringSchema
 import org.apache.flink.util.Collector
 import org.json.{JSONArray, JSONException, JSONObject}
 
@@ -29,21 +31,20 @@ import scala.util.control.Breaks._
  * @date 2022/9/16 10:57
  * @description
  * @update [no][date YYYY-MM-DD][name][description]
- * */
+ **/
 object PermeateSoftwareFlowAnalyse {
   def main(args: Array[String]): Unit = {
 
-
     val confProperties = new IniProperties(args(0))
     //任务名称
-    val jobName = confProperties.getValue(Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_CONFIG, Constants
-      .PERMEATE_SOFTWARE_FLOW_ANALYSE_JOB_NAME)
+    val jobName = confProperties.getValue(Constants.TEST_PERMEATE_SOFTWARE_FLOW_ANALYSE_CONFIG, Constants
+      .TEST_PERMEATE_SOFTWARE_FLOW_ANALYSE_JOB_NAME)
     //kafka的服务地址
     val brokerList = confProperties.getValue(Constants.FLINK_COMMON_CONFIG, Constants
       .KAFKA_BOOTSTRAP_SERVERS)
     //flink消费的group.id
-    val groupId = confProperties.getValue(Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_CONFIG, Constants
-      .PERMEATE_SOFTWARE_FLOW_ANALYSE_GROUP_ID)
+    val groupId = confProperties.getValue(Constants.TEST_PERMEATE_SOFTWARE_FLOW_ANALYSE_CONFIG, Constants
+      .TEST_PERMEATE_SOFTWARE_FLOW_ANALYSE_GROUP_ID)
 
     //Source的并行度
     val sourceParallelism = confProperties.getIntValue(Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_CONFIG,
@@ -55,12 +56,20 @@ object PermeateSoftwareFlowAnalyse {
     val sinkParallelism = confProperties.getIntValue(Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_CONFIG,
       Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_SINK_PARALLELISM)
 
-    //kafka Source的topic
-    val topic = confProperties.getValue(Constants.OPERATION_KELAI_FLINK_TO_KAFKA_CONFIG, Constants
+    //kafka Source的topic -----渗透软件流+cs
+    val permeateCsTopic = confProperties.getValue(Constants.OPERATION_KELAI_FLINK_TO_KAFKA_CONFIG, Constants
       .OPERATION_KELAI_KAFKA_SOURCE_TOPIC)
-    //kafka Sink的topic
-    val kafkaSinkTopic = confProperties.getValue(Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_CONFIG, Constants
-      .PERMEATE_SOFTWARE_FLOW_ANALYSE_SINK_TOPIC)
+    //kafka source 的topic -----蚁剑
+    val antSourceTopic = confProperties.getValue(Constants.OPERATION_FLINK_TO_DRUID_CONFIG,
+      Constants.OPERATION_TOPIC)
+
+    //kafka Sink的topic -----软件渗透流+cs
+    val kafkaSinkTopicPerCs = confProperties.getValue(Constants.TEST_PERMEATE_SOFTWARE_FLOW_ANALYSE_CONFIG, Constants
+      .TEST_PERMEATE_SOFTWARE_FLOW_ANALYSE_SINK_TOPIC)
+    //kafka Sink的topic -----蚁剑
+    val kafkaSinkTopicAnt = confProperties.getValue(Constants.FLINK_ANT_SWORD_CONFIG, Constants
+      .FLINK_ANT_SWORD_CONFIG_KAFKA_SINK_TOPIC)
+
     //告警库topic
     val warningSinkTopic = confProperties.getValue(Constants.WARNING_FLINK_TO_DRUID_CONFIG, Constants
       .WARNING_TOPIC)
@@ -75,9 +84,12 @@ object PermeateSoftwareFlowAnalyse {
 
     //全局变量
     val parameters: Configuration = new Configuration()
+    //文件系统类型
+    parameters.setString(Constants.FILE_SYSTEM_TYPE, confProperties.getValue(Constants.FLINK_COMMON_CONFIG, Constants.FILE_SYSTEM_TYPE))
     //c3p0连接池配置文件路径
     parameters.setString(Constants.c3p0_CONFIG_PATH, confProperties.getValue(Constants.FLINK_COMMON_CONFIG, Constants
       .c3p0_CONFIG_PATH))
+
     //User Agent List
     parameters.setString(Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_USER_AGENT_LIST, confProperties.getValue(
       Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_CONFIG, Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_USER_AGENT_LIST))
@@ -93,82 +105,112 @@ object PermeateSoftwareFlowAnalyse {
     //regex
     parameters.setString(Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_URL_REGEX, confProperties.getValue(
       Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_CONFIG, Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_URL_REGEX))
-    //设置kafka消费者相关配置
-    val props = new Properties()
-    //设置kafka集群地址
-    props.setProperty("bootstrap.servers", brokerList)
-    //设置flink消费的group.id
-    props.setProperty("group.id", groupId)
 
     //获取ExecutionEnvironment
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     //设置check pointing的间隔
     //    env.enableCheckpointing(checkpointInterval)
-    //设置flink时间
-    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
     //设置flink全局变量
     env.getConfig.setGlobalJobParameters(parameters)
 
-    //获取kafka消费者
-    val consumer = new FlinkKafkaConsumer[String](topic, new SimpleStringSchema, props).setStartFromLatest()
+    //获取kafka消费者 -----渗透软件流+cs
+    val permeateCsConsumer = Source.kafkaSource(permeateCsTopic, groupId, brokerList)
+    //获取kafka消费者 -----蚁剑检测
+    val antConsumer = Source.kafkaSource(antSourceTopic, groupId+"ANT", brokerList)
     //告警数据写入云网平台的topic
-    val producer = new FlinkKafkaProducer[String](brokerList, kafkaSinkTopic, new SimpleStringSchema())
+    val producerPerCs = Sink.kafkaSink(brokerList, kafkaSinkTopicPerCs)
+    val producerAnt = Sink.kafkaSink(brokerList, kafkaSinkTopicAnt)
     //将告警数据写入告警库的topic
-    val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
-        SimpleStringSchema())
+    val warningProducer = Sink.kafkaSink(brokerList, warningSinkTopic)
     //获取kafka数据
-    val value = env.addSource(consumer).setParallelism(sourceParallelism)
+    val valuePre = env.fromSource(permeateCsConsumer, WatermarkStrategy.noWatermarks(), "kafkaSource").setParallelism(sourceParallelism)
       .filter(_.nonEmpty).setParallelism(dealParallelism)
       .flatMap(new OperationValueFlatMapFunction).setParallelism(dealParallelism)
       .filter(_.nonEmpty).setParallelism(dealParallelism)
-      .assignTimestampsAndWatermarks(new AssignerWithPunctuatedWatermarks[String] {
-        override def checkAndGetNextWatermark(lastElement: String, extractedTimestamp: Long): Watermark = {
-          new Watermark(extractedTimestamp - 10000)
-        }
+      .assignTimestampsAndWatermarks(
+        WatermarkStrategy.forBoundedOutOfOrderness[String](Duration.ofSeconds(10))
+          .withTimestampAssigner(new SerializableTimestampAssigner[String] {
+            override def extractTimestamp(element: String, recordTimestamp: Long): Long = {
+              element.split("\\|", -1)(3).toLong
+            }
+          })
+      )
 
-        override def extractTimestamp(element: String, previousElementTimestamp: Long): Long = {
-          element.split("\\|", -1)(3).toLong
-        }
-      }).setParallelism(dealParallelism)
-
-    val alertValue = value.map(new SrcAddDesIpMapFunction)
-      .filter(_.!=(null))
+    //------------渗透软件识别-------------
+    val alertValuePermeate = valuePre.map(new SrcAddDesIpMapFunction)
       .keyBy(_._1)
-      .timeWindow(Time.minutes(timeWindows), Time.minutes(timeWindows))
+      .window(SlidingEventTimeWindows.of(Time.minutes(timeWindows), Time.minutes(timeWindows)))
+      // (srcAddDesIp-String, userName-String, requestArrivalTime-String,
+      // hostSet-HashSet, urlSet-HashSet, cookieSet-HashSet, xffSet-HashSet, userAgentSet-HashSet,
+      // acceptSet-HashSet, contentLengthSet-HashSet, cacheControlSet-HashSet)
       .reduce((t1, t2) => {
         (t1._1, t1._2, t1._3,
           t1._4.++(t2._4), t1._5.++(t2._5), t1._6.++(t2._6), t1._7.++(t2._7),
           t1._8.++(t2._8), t1._9.++(t2._9), t1._10.++(t2._10), t1._11.++(t2._11))
       })
       .process(new WebVulnerabilityProcessFunction)
+
+    //-----------cs工具异常使用识别------------
+    val alertValueCobalt = valuePre.process(new CsProcessFunction).setParallelism(dealParallelism)
+
+    //-----蚁剑工具异常检测-----
+    val antStream = env.fromSource(antConsumer, WatermarkStrategy.noWatermarks(), "kafkaSource").setParallelism(sourceParallelism)
+    val antSwardWarnStream = antStream
+      .map(new RichMapFunction[String, (Option[OperationModel], String)] {
+        override def map(value: String): (Option[OperationModel], String) = (OperationModel.getOperationModel(value), value)
+      }).setParallelism(1)
+      .filter(_._1.isDefined).setParallelism(dealParallelism)
+      .map(t => (t._1.head, t._2)).setParallelism(dealParallelism)
+      .process(new antSwardProcessFunction)
+
     //写入告警表
-    alertValue.addSink(new MySQLSink)
+    alertValuePermeate.addSink(new MySQLSink)
+    alertValueCobalt.map(_._1).addSink(new MySQLSink)
+    antSwardWarnStream.map(_._1).addSink(new MySQLSink).uid("ant_sword").name("ant_sword")
 
-    //    //写入发送至风控平台的kafka
-    //    alertValue
-    //      .map(o => {
-    //        JsonUtil.toJson(o._1.asInstanceOf[PermeateSoftwareFlowWarnEntity])
-    //      })
-    //      .addSink(producer)
-    //      .setParallelism(sinkParallelism)
-    //
+    //-----permeate写入发送至风控平台的kafka-----
+    alertValuePermeate
+      .map(o => {
+        JsonUtil.toJson(o._1.asInstanceOf[PermeateSoftwareFlowWarnEntity])
+      })
+      .sinkTo(producerPerCs)
+      .setParallelism(sinkParallelism)
 
-    //    alertValue.map(m => {
-    //      var inPutKafkaValue = ""
-    //      try {
-    //        val entity = m._1.asInstanceOf[PermeateSoftwareFlowWarnEntity]
-    //        inPutKafkaValue = entity.getUsername + "|" + entity.getAlertType + "|" + entity.getAlerttime + "|" +
-    //          "" + "|" + "" + "|" + "" + "|" +
-    //          "" + "|" + entity.getSourceip + "|" + "" + "|" +
-    //          entity.getDesip + "|" + "" + "|" + "" + "|" +
-    //          "" + "|" + "" + "|" + ""
-    //      } catch {
-    //        case e: Exception => {
-    //        }
-    //      }
-    //      inPutKafkaValue
-    //    }).filter(_.nonEmpty).addSink(warningProducer).setParallelism(sinkParallelism)
+    alertValuePermeate.map(m => {
+      var inPutKafkaValue = ""
+      try {
+        val entity = m._1.asInstanceOf[PermeateSoftwareFlowWarnEntity]
+        inPutKafkaValue = entity.getUsername + "|" + entity.getAlertType + "|" + entity.getAlerttime + "|" +
+          "" + "|" + "" + "|" + "" + "|" +
+          "" + "|" + entity.getSourceip + "|" + "" + "|" +
+          entity.getDesip + "|" + "" + "|" + "" + "|" +
+          "" + "|" + "" + "|" + ""
+      } catch {
+        case e: Exception => {
+        }
+      }
+      inPutKafkaValue
+    }).filter(_.nonEmpty).sinkTo(warningProducer).setParallelism(sinkParallelism)
 
+    //-----cs写入发送至风控平台的kafka-----
+    alertValueCobalt
+      .map(o => {
+        JsonUtil.toJson(o._1._1.asInstanceOf[PermeateSoftwareFlowWarnEntity])
+      })
+      .sinkTo(producerPerCs)
+      .setParallelism(sinkParallelism)
+
+    alertValueCobalt.map(_._2).sinkTo(warningProducer).setParallelism(sinkParallelism)
+
+    //-----蚁剑写入发送至风控平台的kafka-----
+    antSwardWarnStream
+      .map(o => {
+        JsonUtil.toJson(o._1._1.asInstanceOf[AntSwordWarnEntity])
+      })
+      .sinkTo(producerAnt)
+      .setParallelism(sinkParallelism)
+
+    antSwardWarnStream.map(_._2).sinkTo(warningProducer).setParallelism(sinkParallelism)
     env.execute(jobName)
   }
 
@@ -176,7 +218,9 @@ object PermeateSoftwareFlowAnalyse {
   class WebVulnerabilityProcessFunction extends ProcessFunction[(String, String, String, mutable.HashSet[String],
     mutable.HashSet[String], mutable.HashSet[String], mutable.HashSet[String], mutable.HashSet[String],
     mutable.HashSet[String], mutable.HashSet[String], mutable.HashSet[String]), (Object, Boolean)] {
-
+    // (srcAddDesIp-String, userName-String, requestArrivalTime-String,
+    // hostSet-HashSet, urlSet-HashSet, cookieSet-HashSet, xffSet-HashSet, userAgentSet-HashSet,
+    // acceptSet-HashSet, contentLengthSet-HashSet, cacheControlSet-HashSet)
     var usrAgentAb = new mutable.ArrayBuffer[String]()
     var acceptAb = new mutable.ArrayBuffer[String]()
     var xffFlagAb = new mutable.ArrayBuffer[String]()
@@ -189,9 +233,10 @@ object PermeateSoftwareFlowAnalyse {
 
     override def open(parameters: Configuration): Unit = {
       val globConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
-      xffFlagStr = globConf.getString(Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_XFF_FLAG, "")
-      cookieStr = globConf.getString(Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_COOKIE_ICE, "")
-      urlRegex = globConf.getString(Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_URL_REGEX, "")
+      xffFlagStr = globConf.getString(ConfigOptions.key(Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_XFF_FLAG).stringType().defaultValue(""))
+      cookieStr = globConf.getString(ConfigOptions.key(Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_COOKIE_ICE).stringType().defaultValue(""))
+      urlRegex = globConf.getString(ConfigOptions.key(Constants.PERMEATE_SOFTWARE_FLOW_ANALYSE_URL_REGEX).stringType().defaultValue(""))
+
       for (i <- usrAgentStr.split("\\|", -1)) {
         usrAgentAb.append(i)
       }
@@ -237,59 +282,51 @@ object PermeateSoftwareFlowAnalyse {
       entity.setUsername(username)
       entity.setAlerttime(new Timestamp(alertTime))
       entity.setAlertHost(hostSet.mkString("|"))
-      val isXffAlert = getIsXffInject(xffSet, xffFlagAb)
-      val urlIsJavaCode = getIsJavaCode(urlSet)
-      val isIceScorpion = getIsIceScorpionAlert(userAgentSet, usrAgentAb, acceptSet, acceptAb, cookieSet, cookieStr,
+      entity.setSourcePort("")
+      entity.setMethod("")
+      entity.setConnection("")
+
+      val isXffAlert: ArrayBuffer[String] = getIsXffInject(xffSet, xffFlagAb)
+      val urlIsJavaCode: ArrayBuffer[String] = getIsJavaCode(urlSet)
+      val isIceScorpion: ArrayBuffer[ArrayBuffer[String]] = getIsIceScorpionAlert(userAgentSet, usrAgentAb, acceptSet, acceptAb, cookieSet, cookieStr,
         contentLengthSet, contentLengthAb, cacheControlSet)
-      val isGodzilla: ArrayBuffer[(ArrayBuffer[String], ArrayBuffer[String])] = getIsGodzilla(cookieSet, acceptSet, cacheControlSet)
-      val isUrlWebShell = getUrlWebShellTrait(urlSet, urlRegex)
-      val isShiroLeak = getIsShiroLeak(cookieSet)
+      val isGodzilla: ArrayBuffer[ArrayBuffer[String]] = getIsGodzilla(cookieSet, acceptSet, cacheControlSet)
+      val isUrlWebShell: ArrayBuffer[String] = getUrlWebShellTrait(urlSet, urlRegex)
+      val isShiroLeak: ArrayBuffer[String] = getIsShiroLeak(cookieSet)
 
       if (isXffAlert.nonEmpty) {
-        for (i <- isXffAlert) {
-          entity.setAlertType("XFF注入攻击")
-          entity.setAlertXff(i)
-          out.collect(entity, true)
-        }
+        entity.setAlertType("XFF注入攻击")
+        entity.setAlertXff(isXffAlert.toString().substring(12, isXffAlert.toString().length - 1))
+        out.collect(entity, true)
       }
       if (urlIsJavaCode.nonEmpty) {
-        for (i <- urlIsJavaCode) {
-          entity.setAlertType("struts2远程代码注入")
-          entity.setAlertUrl(i)
-          out.collect(entity, true)
-        }
+        entity.setAlertType("struts2远程代码注入")
+        entity.setAlertUrl(urlIsJavaCode.toString().substring(12, urlIsJavaCode.toString().length - 1))
+        out.collect(entity, true)
       }
 
       if (isGodzilla.nonEmpty) {
-        for (i <- isGodzilla) {
-          entity.setAlertType("疑似哥斯拉软件渗透")
-          entity.setAlertCookie(i._1.toString().substring(12, i._1.toString.length - 1))
-          entity.setAlertAccept(i._2.toString().substring(12, i._2.toString.length - 1))
-          out.collect(entity, true)
-        }
+        entity.setAlertType("疑似哥斯拉软件渗透")
+        entity.setAlertCookie(isGodzilla(0).toString().substring(12, isGodzilla(0).toString.length - 1))
+        entity.setAlertAccept(isGodzilla(1).toString().substring(12, isGodzilla(1).toString.length - 1))
+        out.collect(entity, true)
       }
-      if (isIceScorpion.nonEmpty) {
-        for (i <- isIceScorpion) {
-          entity.setAlertType("疑似冰蝎软件渗透")
-          entity.setAlertUseragent(i._1.toString().substring(12, i._1.toString.length - 1))
-          entity.setAlertAccept(i._2.toString().substring(12, i._2.toString.length - 1))
-          entity.setAlertCookie(i._5.toString().substring(12, i._5.toString.length - 1))
-          out.collect(entity, true)
-        }
+      if (isIceScorpion != null) {
+        entity.setAlertType("疑似冰蝎软件渗透")
+        entity.setAlertUseragent(isIceScorpion(0).toString().substring(12, isIceScorpion(0).toString.length - 1))
+        entity.setAlertAccept(isIceScorpion(1).toString().substring(12, isIceScorpion(1).toString.length - 1))
+        entity.setAlertCookie(isIceScorpion(4).toString().substring(12, isIceScorpion(4).toString.length - 1))
+        out.collect(entity, true)
       }
       if (isUrlWebShell.nonEmpty) {
-        for (i <- isUrlWebShell) {
-          entity.setAlertType("Web-Shell")
-          entity.setAlertUrl(i)
-          out.collect(entity, true)
-        }
+        entity.setAlertType("Web-Shell")
+        entity.setAlertUrl(isUrlWebShell.toString().substring(12, isUrlWebShell.toString().length - 1))
+        out.collect(entity, true)
       }
       if (isShiroLeak.nonEmpty) {
-        for (i <- isShiroLeak) {
-          entity.setAlertType("Shiro漏洞利用")
-          entity.setAlertCookie(i)
-          out.collect(entity, true)
-        }
+        entity.setAlertType("Shiro漏洞利用")
+        entity.setAlertCookie(isShiroLeak.toString().substring(12, isShiroLeak.toString().length - 1))
+        out.collect(entity, true)
       }
     }
 
@@ -304,31 +341,42 @@ object PermeateSoftwareFlowAnalyse {
       isShiroLeak
     }
 
+    //userAgentSet, usrAgentAb, acceptSet, acceptAb, cookieSet, cookieStr,
+    //contentLengthSet, contentLengthAb, cacheControlSet
     def getIsIceScorpionAlert(userAgentSet: mutable.HashSet[String], usrAgentAb: ArrayBuffer[String],
                               acceptSet: mutable.HashSet[String], acceptAb: ArrayBuffer[String],
                               cookieSet: mutable.HashSet[String], cookieStr: String,
                               contentLengthSet: mutable.HashSet[String], contentLengthAb: mutable.ArrayBuffer[String],
-                              cacheControlSet: mutable.HashSet[String])
-    : ArrayBuffer[Tuple5[ArrayBuffer[String], ArrayBuffer[String], ArrayBuffer[String], ArrayBuffer[String], ArrayBuffer[String]]] = {
+                              cacheControlSet: mutable.HashSet[String]): ArrayBuffer[ArrayBuffer[String]] = {
 
-      val iceScorpionAlertBuffer = new ArrayBuffer[Tuple5[ArrayBuffer[String], ArrayBuffer[String], ArrayBuffer[String], ArrayBuffer[String], ArrayBuffer[String]]]()
+      val iceScorpionAlertBuffer = new ArrayBuffer[ArrayBuffer[String]]()
 
       val UaTrait: ArrayBuffer[String] = getFirstSetContainsSecondAbFunction(userAgentSet, usrAgentAb)
       val AcceptTrait: ArrayBuffer[String] = getFirstSetContainsSecondAbFunction(acceptSet, acceptAb)
       val contentLengthTrait: ArrayBuffer[String] = getFirstSetContainsSecondAbFunction(contentLengthSet, contentLengthAb)
 
-      val cacheControlTrait = getIsCacheControl(cacheControlSet)
+      val cacheControlTrait: ArrayBuffer[String] = getIsCacheControl(cacheControlSet)
       val cookieTrait = getIsCookie(cookieSet)
 
-      val tuple5 = Tuple5(UaTrait, AcceptTrait, contentLengthTrait, cacheControlTrait, cookieTrait)
-      val out = innerBufferSumOfNull(tuple5)
-      //内部有两个以上ArrayBuffer不为空时追加
-      if (out > 2) {
-        iceScorpionAlertBuffer.append(tuple5)
-      }
-      iceScorpionAlertBuffer
-    }
+      iceScorpionAlertBuffer.+=(UaTrait)
+      iceScorpionAlertBuffer.+=(AcceptTrait)
+      iceScorpionAlertBuffer.+=(contentLengthTrait)
+      iceScorpionAlertBuffer.+=(cacheControlTrait)
+      iceScorpionAlertBuffer.+=(cookieTrait)
 
+      //一组有两个以上ArrayBuffer不为空时取
+      var count = 0
+      for (innerBf <- iceScorpionAlertBuffer) {
+        if (innerBf.nonEmpty) {
+          count += 1
+        }
+      }
+      if (count > 2) {
+        iceScorpionAlertBuffer
+      } else {
+        null
+      }
+    }
 
     //新增
     def getIsCacheControl(value: mutable.HashSet[String]): ArrayBuffer[String] = {
@@ -353,36 +401,15 @@ object PermeateSoftwareFlowAnalyse {
       cookieBuffer
     }
 
-    // 判断内部ArrayBuffer不为空的个数
-    def innerBufferSumOfNull(tuple5: (ArrayBuffer[String], ArrayBuffer[String], ArrayBuffer[String], ArrayBuffer[String], ArrayBuffer[String])): Int = {
-      var sum = 0
-      if (tuple5._1.nonEmpty) {
-        sum += 1
-      }
-      if (tuple5._2.nonEmpty) {
-        sum += 1
-      }
-      if (tuple5._3.nonEmpty) {
-        sum += 1
-      }
-      if (tuple5._4.nonEmpty) {
-        sum += 1
-      }
-      if (tuple5._5.nonEmpty) {
-        sum += 1
-      }
-      sum
-    }
-
     def getUrlWebShellTrait(urlSet: mutable.HashSet[String], urlRegex: String): ArrayBuffer[String] = {
       val urlWebShellBuffer = new ArrayBuffer[String]()
-      var urlTrait = (false, "")
+      //      var urlTrait = (false, "")
       //  \.(php|php5|jsp|asp|jspx|asa)\?(\w){1,20}=\d{2,10}^\.(PHP|jsp|asp|jspx|asa)
       val urlRegexArr = urlRegex.split("\\^", -1)
       for (url <- urlSet) {
         if (urlRegexArr(0).r.findAllMatchIn(url.toLowerCase()).nonEmpty ||
           urlRegexArr(1).r.findAllMatchIn(url.toLowerCase()).nonEmpty) {
-          urlTrait = (true, url)
+          //          urlTrait = (true, url)
           urlWebShellBuffer.append(url)
         }
       }
@@ -390,18 +417,23 @@ object PermeateSoftwareFlowAnalyse {
     }
 
     def getIsGodzilla(cookieSet: mutable.HashSet[String], acceptSet: mutable.HashSet[String],
-                      cacheControlSet: mutable.HashSet[String]): ArrayBuffer[Tuple2[ArrayBuffer[String], ArrayBuffer[String]]] = {
+                      cacheControlSet: mutable.HashSet[String]): ArrayBuffer[ArrayBuffer[String]] = {
 
-      val godzillaBuffer = new ArrayBuffer[Tuple2[ArrayBuffer[String], ArrayBuffer[String]]]()
+      val godzillaBuffer = new ArrayBuffer[ArrayBuffer[String]]()
+
       val cookieBuffer: ArrayBuffer[String] = cookie(cookieSet)
       val acceptBuffer: ArrayBuffer[String] = accept(acceptSet)
       val cacheBuffer: ArrayBuffer[String] = cache(cacheControlSet)
 
+      val buffer_3 = new ArrayBuffer[ArrayBuffer[String]]()
+      buffer_3.+=(cookieBuffer)
+      buffer_3.+=(acceptBuffer)
+      buffer_3.+=(cacheBuffer)
 
-      val tuple3 = Tuple3(cookieBuffer, acceptBuffer, cacheBuffer)
-      val tuple2 = Tuple2(cookieBuffer, acceptBuffer)
-      if (tuple3._1.nonEmpty && (tuple3._2.nonEmpty || tuple3._3.nonEmpty)) {
-        godzillaBuffer.append(tuple2)
+      // if (tuple3._1.nonEmpty && (tuple3._2.nonEmpty || tuple3._3.nonEmpty)) {
+      if (buffer_3(0).nonEmpty && (buffer_3(1).nonEmpty || buffer_3(2).nonEmpty)) {
+        godzillaBuffer.+=(cookieBuffer)
+        godzillaBuffer.+=(acceptBuffer)
         //        (true, cookieTrait._2, acceptTrait._2)
       }
       godzillaBuffer
@@ -439,13 +471,15 @@ object PermeateSoftwareFlowAnalyse {
     }
 
     def getIsXffInject(xffSet: mutable.HashSet[String], xffFlagAb: ArrayBuffer[String]): ArrayBuffer[String] = {
-      val isXffInjectBuffer = new ArrayBuffer[String]()
-      for (i <- xffSet) {
-        val funBuffer = getFirstSetContainsSecondAbFunction(xffSet, xffFlagAb)
-        if (funBuffer.nonEmpty) {
-          isXffInjectBuffer.append(i)
-        }
+      var isXffInjectBuffer = new ArrayBuffer[String]()
+      //todo 这里for循环删除
+      //for (i <- xffSet) {
+      val funBuffer = getFirstSetContainsSecondAbFunction(xffSet, xffFlagAb)
+      if (funBuffer.nonEmpty) {
+        //          isXffInjectBuffer.append(i)
+        isXffInjectBuffer = funBuffer
       }
+      //    }
       isXffInjectBuffer
     }
 
@@ -457,10 +491,12 @@ object PermeateSoftwareFlowAnalyse {
         for (j <- value) {
           //todo contains or equals
           if (j.replaceAll(" ", "").equals(i)) {
-            firstSetContainsSecondAbBuffer.append(j)
+            //            firstSetContainsSecondAbBuffer.append(j)
+            firstSetContainsSecondAbBuffer.append(i)
           }
         }
       }
+      //保证了一个flag中的值只被追加一次, 拿到flag中匹配到的所有值(一个窗口中的set)
       firstSetContainsSecondAbBuffer
     }
 
@@ -482,6 +518,10 @@ object PermeateSoftwareFlowAnalyse {
   class SrcAddDesIpMapFunction extends RichMapFunction[String, (String, String, String, mutable.HashSet[String],
     mutable.HashSet[String], mutable.HashSet[String], mutable.HashSet[String], mutable.HashSet[String],
     mutable.HashSet[String], mutable.HashSet[String], mutable.HashSet[String])] {
+    //map后结果为:
+    // (srcAddDesIp-String, userName-String, requestArrivalTime-String,
+    // hostSet-HashSet, urlSet-HashSet, cookieSet-HashSet, xffSet-HashSet, userAgentSet-HashSet,
+    // acceptSet-HashSet, contentLengthSet-HashSet, cacheControlSet-HashSet)
     override def map(value: String): (String, String, String, mutable.HashSet[String],
       mutable.HashSet[String], mutable.HashSet[String], mutable.HashSet[String], mutable.HashSet[String],
       mutable.HashSet[String], mutable.HashSet[String], mutable.HashSet[String]) = {
@@ -494,35 +534,33 @@ object PermeateSoftwareFlowAnalyse {
       val contentLengthSet = mutable.HashSet[String]()
       val cacheControlSet = mutable.HashSet[String]()
       val flowValue = value.split("\\|", -1)
-      if (flowValue.length == 12) {
-        val sourceIP = flowValue(0)
-        val destinationIp = flowValue(1)
-        val userName = flowValue(2)
-        val requestArrivalTime = flowValue(3)
-        val host = flowValue(4)
-        val url = flowValue(5)
-        val cookie = flowValue(6)
-        val xff = flowValue(7)
-        val useAgent = flowValue(8)
-        val accept = flowValue(9)
-        val contentLength = flowValue(10)
-        val cacheControl = flowValue(11)
+      //      if (flowValue.length == 12) {
+      val sourceIP = flowValue(0)
+      val destinationIp = flowValue(1)
+      val userName = flowValue(2)
+      val requestArrivalTime = flowValue(3)
+      val host = flowValue(4)
+      val url = flowValue(5)
+      val cookie = flowValue(6)
+      val xff = flowValue(7)
+      val useAgent = flowValue(8)
+      val accept = flowValue(9)
+      val contentLength = flowValue(10)
+      val cacheControl = flowValue(11)
 
-        val srcAddDesIp = sourceIP + "-" + destinationIp
-        hostSet.+=(host)
-        urlSet.+=(url)
-        cookieSet.+=(cookie)
-        xffSet.+=(xff)
-        userAgentSet.+=(useAgent)
-        acceptSet.+=(accept)
-        contentLengthSet.+=(contentLength)
-        cacheControlSet.+=(cacheControl)
+      val srcAddDesIp = sourceIP + "-" + destinationIp
+      hostSet.+=(host)
+      urlSet.+=(url)
+      cookieSet.+=(cookie)
+      xffSet.+=(xff)
+      userAgentSet.+=(useAgent)
+      acceptSet.+=(accept)
+      contentLengthSet.+=(contentLength)
+      cacheControlSet.+=(cacheControl)
 
-        (srcAddDesIp, userName, requestArrivalTime, hostSet, urlSet, cookieSet, xffSet, userAgentSet, acceptSet,
-          contentLengthSet, cacheControlSet)
-      } else {
-        null
-      }
+      (srcAddDesIp, userName, requestArrivalTime, hostSet, urlSet, cookieSet, xffSet, userAgentSet, acceptSet,
+        contentLengthSet, cacheControlSet)
+      //      }
 
     }
   }
@@ -540,6 +578,7 @@ object PermeateSoftwareFlowAnalyse {
           val sourceIP = recordsObject.get("req_flow_sender_ip_addr") //源IP 3
           val reqTime = recordsObject.get("first_req_pkt_time").toString //每个请求包的时间点
           val requestArrivalTime = KeLaiTimeUtils.getKeLaiTime(reqTime)
+          val sourcePort = recordsObject.get("req_flow_sender_port") //源端口
           if ("-".equals(sourceIP)) {
             break()
           }
@@ -554,6 +593,8 @@ object PermeateSoftwareFlowAnalyse {
           var accept = ""
           var contentLength = ""
           var cacheControl = ""
+          var method = ""
+          var connection = ""
 
           var clientDataobject = new JSONObject()
           try {
@@ -612,19 +653,31 @@ object PermeateSoftwareFlowAnalyse {
             try {
               contentLength = clientDataobject.getString("ContentLength") //contentLength
             } catch {
-              case e: JSONException => accept = ""
+              case e: JSONException => contentLength = ""
             }
 
             try {
               cacheControl = clientDataobject.getString("CacheControl") //cacheControl
             } catch {
-              case e: JSONException => accept = ""
+              case e: JSONException => cacheControl = ""
             }
           }
 
-          val builder: StringBuilder = new StringBuilder
+          try {
+            method = clientDataobject.getString("Method") //cacheControl
+          } catch {
+            case e: JSONException => method = ""
+          }
+
+          try {
+            connection = clientDataobject.getString("Connection") //cacheControl
+          } catch {
+            case e: JSONException => connection = ""
+          }
+
+          val builder: StringBuilder = new StringBuilder()
           builder.append(sourceIP + "|" + destinationIp + "|" + userName + "|" + requestArrivalTime + "|" + host + "|"
-            + url + "|" + cookie + "|" + XFF + "|" + useAgent + "|" + accept + "|" + contentLength + "|" + cacheControl)
+            + url + "|" + cookie + "|" + XFF + "|" + useAgent + "|" + accept + "|" + contentLength + "|" + cacheControl+ "|" + sourcePort +"|" + method+"|" + connection+"|" + protocol)
           out.collect(builder.toString)
         }
 
@@ -632,4 +685,255 @@ object PermeateSoftwareFlowAnalyse {
     }
   }
 
+  class CsProcessFunction extends ProcessFunction[(String), ((Object, Boolean), String)] {
+
+    //http-beacon通信中，默认使用get方法向/dpixel、/__utm.gif、/pixel.gif等地址发起请求，此集合为相关特征
+    var beaconGet = new mutable.ArrayBuffer[String]()
+
+    override def open(parameters: Configuration): Unit = {
+      //全局配置
+      val globalConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
+      //初始化beaconGet特征集合
+      beaconGet = beaconGet:+"/ca"
+      beaconGet = beaconGet:+"/dpixel"
+      beaconGet = beaconGet:+"/__utm.gif"
+      beaconGet = beaconGet:+"/pixel.gif"
+      beaconGet = beaconGet:+"/dot.gif"
+      beaconGet = beaconGet:+"/updates.rss"
+      beaconGet = beaconGet:+"/fwlink"
+      beaconGet = beaconGet:+"/cm"
+      beaconGet = beaconGet:+"/cx"
+      beaconGet = beaconGet:+"/match"
+      beaconGet = beaconGet:+"/visit.js"
+      beaconGet = beaconGet:+"/load"
+      beaconGet = beaconGet:+"/push"
+      beaconGet = beaconGet:+"/ptj"
+      beaconGet = beaconGet:+"/j.ad"
+      beaconGet = beaconGet:+"/ga.js"
+      beaconGet = beaconGet:+"/en_US"
+      beaconGet = beaconGet:+"/all.js"
+      beaconGet = beaconGet:+"/activity"
+      beaconGet = beaconGet:+"/IE9CompatViewList.xml"
+    }
+
+    /**
+     * @title
+     * CS流量特征分析检测
+     * @description
+     * * 1、检查端口是否为50050   cs默认端口为50050
+     * * 2、通过checksum8 算法判断 是否等于 92 或93
+     * * 3、检测http-beacon通信中，默认使用get方法向/dpixel、/__utm.gif、/pixel.gif等地址发起请求 判断url是否在这个集合内
+     * * 4、疑似通过post方式向c2服务器发起数据回传请求CobaltStrike渗透，检测请求方式为POST请求，url包含“/submit.php?id=” connection连接包含"keep-alive"内容
+     * 参考资料 https://paper.seebug.org/1922/
+     * @author kimchie
+     * @updateTime
+     * @throws
+     */
+    override def processElement(value: (String), ctx: ProcessFunction[(String),
+      ((Object, Boolean), String)]#Context, out: Collector[((Object, Boolean), String)]): Unit = {
+
+      val flowValue = value.split("\\|", -1)
+      if (flowValue.length == 16) {
+        val sourceIp = flowValue(0)
+        val destinationIp = flowValue(1)
+        val userName = flowValue(2)
+        val requestArrivalTime = flowValue(3)
+        val host = flowValue(4)
+        val url = flowValue(5)
+        val cookie = flowValue(6)
+        val xff = flowValue(7)
+        val useAgent = flowValue(8)
+        val accept = flowValue(9)
+        val contentLength = flowValue(10)
+        val cacheControl = flowValue(11)
+        val sourcePort = flowValue(12)
+        val method = flowValue(13)
+        val connection = flowValue(14)
+        val protocol = flowValue(15)
+
+
+        var isCobaltStrike = false
+
+        val entity = new PermeateSoftwareFlowWarnEntity()
+        entity.setSourceip(sourceIp)
+        entity.setDesip(destinationIp)
+        entity.setUsername(userName)
+        entity.setAlerttime(new Timestamp(requestArrivalTime.toLong))
+        entity.setAlertHost(host)
+        entity.setSourcePort(sourcePort)
+        entity.setAlertXff(xff)
+        entity.setAlertUrl(protocol+host+url)
+        entity.setAlertAccept(accept)
+        entity.setAlertUseragent(useAgent)
+        entity.setMethod(method)
+        entity.setConnection(connection)
+        entity.setAlertCookie(cookie)
+        //50050端口cs工具默认端口
+        if(sourcePort!=null && sourcePort.equals("50050")){
+          entity.setAlertType("端口疑似CobaltStrike渗透")
+          isCobaltStrike = true
+        }
+
+        //强特征  checksum8
+        //val  uri = "/Yle2"
+        //http-beacon通信中，默认使用get方法向/dpixel、/__utm.gif、/pixel.gif等地址发起请求，
+        // 同时请求头存在cookie字段并且值为base64编码后的非对算算法加密数据。
+        if (isStager(url) || isStagerX64(url)) {
+          entity.setAlertType("checksum8检测疑似CobaltStrike渗透")
+          isCobaltStrike = true
+        }
+        if (beaconGet.contains(url.trim)) {
+          entity.setAlertType("beaconGet检测疑似CobaltStrike渗透")
+          isCobaltStrike = true
+        }
+
+
+        if (method=="POST" && url.indexOf("/submit.php?id=") > -1 && connection.indexOf("keep-alive") > -1) {
+          entity.setAlertType("疑似通过post方式向c2服务器发起数据回传请求CobaltStrike渗透")
+          isCobaltStrike = true
+        }
+
+        val inputKafkaValue = userName + "|" + "CS工具异常使用检测" + "|" + requestArrivalTime + "|" +
+          "" + "|" + "" + "|" + "" + "|" +
+          "" + "|" + sourceIp + "|" + sourcePort + "|" +
+          destinationIp + "|" + "" + "|" + url + "|" +
+          "" + "|" + "" + "|" + ""
+
+        if (isCobaltStrike) {
+          out.collect((entity, true), inputKafkaValue)
+        }
+      }
+    }
+
+    //强特征  checksum8
+    def checksum8(text: String): Int = {
+      if (text.length() < 4) {
+        return 0
+      }
+      if (text.indexOf("/")!= text.lastIndexOf("/")) {
+        return 0
+      }
+      var str = text.replace("/", "")
+      var sum = 0
+      for (x <- 0 to str.length()-1) {
+        sum += str.charAt(x)
+      }
+      sum % 256
+    }
+
+    def isStager(uri: String): Boolean = {
+      checksum8(uri) == 92L
+    }
+
+    def isStagerX64(uri: String): Boolean = {
+      (checksum8(uri) == 93L) && (uri.matches("/[A-Za-z0-9]{4}"))
+    }
+
+  }
+
+  class antSwardProcessFunction extends ProcessFunction[(OperationModel, String), ((Object, Boolean), String)] {
+    var groupSplit: Char = _
+    var kvSplit: Char = _
+    var ruleList: List[String] = _
+
+    override def open(parameters: Configuration): Unit = {
+
+      val globalConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
+      groupSplit = globalConf.getInteger(ConfigOptions.key(Constants.XSS_INJECTION_GROUP_SPLIT).intType().defaultValue(0)).asInstanceOf[Char]
+      kvSplit = globalConf.getInteger(ConfigOptions.key(Constants.XSS_INJECTION_KV_SPLIT).intType().defaultValue(0)).asInstanceOf[Char]
+      ruleList = initCheckAntSwardDataRuleMap
+    }
+
+    override def processElement(value: (OperationModel, String), ctx: ProcessFunction[(OperationModel, String), ((Object, Boolean), String)]#Context,
+                                out: Collector[((Object, Boolean), String)]): Unit = {
+      var isAntSward = false
+      val values = value._2.split("\\|", -1)
+      val userAgent = values(9)
+      val formValues = values(30) //请求内容
+      val url = values(6)
+      //判断userAgent是否是蚁剑
+      if (userAgent.indexOf("antSword") > -1) {
+        isAntSward = true
+      }
+
+      if (values.length >= 31) {
+        if (formValues != null && formValues.length > 0) {
+          for (formValue <- formValues.split(groupSplit)) {
+            val kvValues = formValue.split(kvSplit)
+            if (kvValues != null && kvValues.length == 2) {
+              var urlValue = ""
+              try {
+                urlValue = URLDecoder.decode(kvValues(1).replaceAll("%(?![0-9a-fA-F]{2})", "%25")
+                  , "utf-8")
+              } catch {
+                case e: Exception => {
+                }
+              }
+              for (rule <- ruleList) {
+                if (plusPercent(urlValue).indexOf(rule) > -1) {
+                  isAntSward = true
+                }
+              }
+            }
+          }
+        }
+      }
+
+      def plusPercent(str: String): String = {
+        val stringBuffer = new StringBuffer()
+        for (char <- str.toCharArray) {
+
+          stringBuffer.append(char)
+          if (char.equals('%')) {
+            stringBuffer.append("%")
+          }
+        }
+        stringBuffer.toString
+      }
+
+      if (isAntSward) {
+        val antSwordWarnEntity = new AntSwordWarnEntity
+        antSwordWarnEntity.setAlertTime(new Timestamp(value._1.timeStamp))
+        antSwordWarnEntity.setUserName(value._1.userName)
+        antSwordWarnEntity.setLoginSystem(value._1.loginSystem)
+        antSwordWarnEntity.setDestinationIp(value._1.destinationIp)
+        antSwordWarnEntity.setLoginPlace(value._1.loginPlace)
+        antSwordWarnEntity.setSourceIp(value._1.sourceIp)
+        antSwordWarnEntity.setHttpStatus(value._1.httpStatus)
+        if (formValues.length > 1000) {
+          antSwordWarnEntity.setFormValue(formValues.substring(0, 1000))
+        } else {
+          antSwordWarnEntity.setFormValue(formValues)
+        }
+
+        val inputKafkaValue = value._1.userName + "|" + "蚁剑工具异常使用行为检测: " + "|" + value._1.timeStamp + "|" +
+          "" + "|" + value._1.loginSystem + "|" + "" + "|" +
+          "" + "|" + value._1.sourceIp + "|" + "" + "|" +
+          value._1.destinationIp + "|" + "" + "|" + url + "|" +
+          value._1.httpStatus + "|" + "" + "|" + ""
+
+        out.collect((antSwordWarnEntity, false), inputKafkaValue)
+      }
+    }
+
+    /**
+     * @title 初始化验证蚁剑规则的数据
+     * @description
+     * @author kimchie
+     * @updateTime
+     * @throws
+     */
+    def initCheckAntSwardDataRuleMap: List[String] = {
+      var datas: List[String] = List("@ini_s")
+      //base64
+      datas = datas :+ "QGluaV9z"
+      //chr
+      datas = datas :+ "cHr(64).ChR(105).ChR(1 10).ChR(105).ChR(95).ChR(115)"
+      //chr16
+      datas = datas :+ "cHr(0x40).ChR(0x69).ChR(0x6e).ChR(0x69).ChR(0x5f).ChR(0x73)"
+      //rot13
+      datas = datas :+ "@vav_f"
+      datas
+    }
+  }
 }

@@ -1,22 +1,23 @@
 package cn.ffcs.is.mss.analyzer.flink.warn
 
 import java.sql.Timestamp
+import java.time.Duration
 import java.util.Properties
-import cn.ffcs.is.mss.analyzer.bean.{DdosWarnEntity, LowVelocityScanEntity}
+
+import cn.ffcs.is.mss.analyzer.bean.LowVelocityScanEntity
 import cn.ffcs.is.mss.analyzer.druid.model.scala.QuintetModel
-import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
+import cn.ffcs.is.mss.analyzer.flink.sink.{MySQLSink, Sink}
+import cn.ffcs.is.mss.analyzer.flink.source.Source
 import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties, JsonUtil}
 import org.apache.flink.api.common.accumulators.LongCounter
+import org.apache.flink.api.common.eventtime.{SerializableTimestampAssigner, WatermarkStrategy}
 import org.apache.flink.api.common.functions.RichMapFunction
 import org.apache.flink.api.common.state.{ValueState, ValueStateDescriptor}
-import org.apache.flink.configuration.Configuration
-import org.apache.flink.streaming.api.TimeCharacteristic
-import org.apache.flink.streaming.api.functions.{AssignerWithPunctuatedWatermarks, ProcessFunction}
+import org.apache.flink.configuration.{ConfigOptions, Configuration}
+import org.apache.flink.streaming.api.functions.KeyedProcessFunction
 import org.apache.flink.streaming.api.scala.{StreamExecutionEnvironment, _}
-import org.apache.flink.streaming.api.watermark.Watermark
+import org.apache.flink.streaming.api.windowing.assigners.SlidingEventTimeWindows
 import org.apache.flink.streaming.api.windowing.time.Time
-import org.apache.flink.streaming.connectors.kafka.{FlinkKafkaConsumer, FlinkKafkaProducer}
-import org.apache.flink.streaming.util.serialization.SimpleStringSchema
 import org.apache.flink.util.Collector
 
 import scala.collection.JavaConversions._
@@ -124,44 +125,32 @@ object LowVelocityScan {
     parameters.setDouble(Constants.LOW_VELOCITY_SCAN_VERTICAL_INPUTOCTES_PROBABILITY, confProperties.getFloatValue(Constants.
       LOW_VELOCITY_SCAN_CONFIG, Constants.LOW_VELOCITY_SCAN_VERTICAL_INPUTOCTES_PROBABILITY))
 
-
-    //设置kafka消费者相关配置
-    val props = new Properties()
-    //设置kafka集群地址
-    props.setProperty("bootstrap.servers", brokerList)
-    //设置flink消费的group.id
-    props.setProperty("group.id", groupId + "test")
     //获取kafka消费者
-    val consumer = new FlinkKafkaConsumer[String](topic, new SimpleStringSchema, props)
-      .setStartFromLatest()
+    val consumer = Source.kafkaSource(topic, groupId, brokerList)
     //获取kafka 生产者
-    val producer = new FlinkKafkaProducer[String](brokerList, kafkaSinkTopic, new
-        SimpleStringSchema())
-
+    val producer = Sink.kafkaSink(brokerList, kafkaSinkTopic)
 
     //获取ExecutionEnvironment
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     //设置check pointing的间隔
     //env.enableCheckpointing(checkpointInterval)
-    //设置流的时间为EventTime
-    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
     //设置flink全局变量
     env.getConfig.setGlobalJobParameters(parameters)
 
 
     //获取数据流
-    val dStream = env.addSource(consumer).setParallelism(sourceParallelism)
+    val dStream = env.fromSource(consumer, WatermarkStrategy.noWatermarks(), "kafkaSource").setParallelism(sourceParallelism)
+
     //流处理
     val streamData = dStream.map(JsonUtil.fromJson[QuintetModel] _).setParallelism(dealParallelism)
-      .assignTimestampsAndWatermarks(new AssignerWithPunctuatedWatermarks[QuintetModel] {
-        override def checkAndGetNextWatermark(lastElement: QuintetModel, extractedTimestamp: Long): Watermark = {
-          new Watermark(extractedTimestamp - 10000)
-        }
-
-        override def extractTimestamp(element: QuintetModel, previousElementTimestamp: Long): Long = {
-          element.timeStamp
-        }
-      }).setParallelism(dealParallelism)
+      .assignTimestampsAndWatermarks(
+        WatermarkStrategy.forBoundedOutOfOrderness[QuintetModel](Duration.ofSeconds(10))
+          .withTimestampAssigner(new SerializableTimestampAssigner[QuintetModel] {
+            override def extractTimestamp(element: QuintetModel, recordTimestamp: Long): Long = {
+              element.timeStamp
+            }
+          })
+      ).setParallelism(dealParallelism)
 
 
     // todo 根据后续使用情况增加修改参数配置
@@ -175,7 +164,7 @@ object LowVelocityScan {
     val levelSinkData = streamData.map(new LevelScanMapFunction).setParallelism(dealParallelism)
       .keyBy(_._1)
       //todo 调参statisticsTimeWindow
-      .timeWindow(Time.minutes(levelStatisticsTimeWindow), Time.minutes(levelStatisticsTimeWindow))
+      .window(SlidingEventTimeWindows.of(Time.minutes(2), Time.minutes(2)))
       .reduce((t1, t2) => {
         (t1._1, t1._2.++(t2._2), t1._3.++(t2._3), t1._4.++(t2._4), t1._5.++(t2._5))
       })
@@ -201,7 +190,7 @@ object LowVelocityScan {
     val verticalSinkData = streamData.map(new VerticalScanMapFunction).setParallelism(dealParallelism)
       .keyBy(_._1)
       //todo 调参statisticsTimeWindow
-      .timeWindow(Time.minutes(verticalStatisticsTimeWindow), Time.minutes(verticalStatisticsTimeWindow))
+      .window(SlidingEventTimeWindows.of(Time.minutes(2), Time.minutes(2)))
       .reduce((t1, t2) => {
         (t1._1, t1._2.++(t2._2), t1._3.++(t2._3), t1._4.++(t2._4), t1._5.++(t2._5))
 
@@ -219,14 +208,13 @@ object LowVelocityScan {
       .map(o => {
         JsonUtil.toJson(o._1.asInstanceOf[LowVelocityScanEntity])
       })
-      .addSink(producer)
+      .sinkTo(producer)
       .setParallelism(kafkaSinkParallelism)
 
     //将告警数据写入告警库topic
-    val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
-        SimpleStringSchema())
+    val warningProducer = Sink.kafkaSink(brokerList, warningSinkTopic)
     levelalertKafkaValue.union(verticalAlertKafkaValue)
-      .addSink(warningProducer).setParallelism(kafkaSinkParallelism)
+      .sinkTo(warningProducer).setParallelism(kafkaSinkParallelism)
     env.execute(jobName)
 
   }
@@ -241,7 +229,7 @@ object LowVelocityScan {
    * @description 将水平扫描的聚合数据进行处理
    * @update [no][date YYYY-MM-DD][name][description]
    */
-  class LevelScanProcessFunction extends ProcessFunction[(String, mutable.HashSet[String], mutable.ArrayBuffer[Long],
+  class LevelScanProcessFunction extends KeyedProcessFunction[String, (String, mutable.HashSet[String], mutable.ArrayBuffer[Long],
     mutable.HashSet[String], mutable.HashSet[Long]), ((Object, Boolean), String)] {
     val levelReceiveMessage: LongCounter = new LongCounter()
     val levelResultToMysqlMessage: LongCounter = new LongCounter()
@@ -273,10 +261,11 @@ object LowVelocityScan {
       //全局配置
       val globalConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
       //todo 调参并写入ini 修改LOW_VELOCITY_SCAN_STATISTICS_TIMESTEP_SIZE_MAX
-      levelTimeStepSize = globalConf.getLong(Constants.LOW_VELOCITY_SCAN_LEVEL_STATISTICS_TIMESTEP_SIZE_MAX, 0L)
-      levelTimeWindowCount = globalConf.getInteger(Constants.LOW_VELOCITY_SCAN_LEVEL_STATISTICS_TIMEWINDOW_COUNT, 0)
-      levelPreDipComentropy = globalConf.getDouble(Constants.LOW_VELOCITY_SCAN_LEVEL_COMENTROPY, 0.00D)
-      levelProbability = globalConf.getDouble(Constants.LOW_VELOCITY_SCAN_LEVEL_INPUTOCTES_PROBABILITY, 0.00D)
+      levelTimeStepSize = globalConf.getLong(ConfigOptions.key(Constants.LOW_VELOCITY_SCAN_LEVEL_STATISTICS_TIMESTEP_SIZE_MAX).longType().defaultValue(0L))
+      levelTimeWindowCount = globalConf.getInteger(ConfigOptions.key(Constants.LOW_VELOCITY_SCAN_LEVEL_STATISTICS_TIMEWINDOW_COUNT).intType().defaultValue(0))
+      levelPreDipComentropy = globalConf.getDouble(ConfigOptions.key(Constants.LOW_VELOCITY_SCAN_LEVEL_COMENTROPY).doubleType().defaultValue(0.00D))
+      levelProbability = globalConf.getDouble(ConfigOptions.key(Constants.LOW_VELOCITY_SCAN_LEVEL_INPUTOCTES_PROBABILITY).doubleType().defaultValue(0.00D))
+
 
       getRuntimeContext.addAccumulator("level received", levelReceiveMessage)
       getRuntimeContext.addAccumulator("level resultToMysql Message", levelResultToMysqlMessage)
@@ -285,17 +274,14 @@ object LowVelocityScan {
 
     }
 
-
-    override def onTimer(timestamp: Long, ctx: ProcessFunction[(String, mutable.HashSet[String], ArrayBuffer[Long],
+    override def onTimer(timestamp: Long, ctx: KeyedProcessFunction[String, (String, mutable.HashSet[String], ArrayBuffer[Long],
       mutable.HashSet[String], mutable.HashSet[Long]), ((Object, Boolean), String)]#OnTimerContext,
                          out: Collector[((Object, Boolean), String)]): Unit = {
-
       levelPreDipVessel.clear()
       levelProtocolVessel.clear()
       levelInputOctetsVessel.clear()
       levelPerDipLenVessel.clear()
     }
-
     /**
      *
      *
@@ -352,7 +338,7 @@ object LowVelocityScan {
     }
 
     override def processElement(value: (String, mutable.HashSet[String], ArrayBuffer[Long], mutable.HashSet[String], mutable.HashSet[Long]),
-                                ctx: ProcessFunction[(String, mutable.HashSet[String], ArrayBuffer[Long], mutable.HashSet[String],
+                                ctx: KeyedProcessFunction[String, (String, mutable.HashSet[String], ArrayBuffer[Long], mutable.HashSet[String],
                                   mutable.HashSet[Long]), ((Object, Boolean), String)]#Context,
                                 out: Collector[((Object, Boolean), String)]): Unit = {
       val time = value._3.get(0)
@@ -485,7 +471,7 @@ object LowVelocityScan {
    * @description 对垂直扫描聚合后的数据进行处理
    * @update [no][date YYYY-MM-DD][name][description]
    */
-  class VerticalScanProcessFunction extends ProcessFunction[(String, mutable.HashSet[String], mutable.ArrayBuffer[Long],
+  class VerticalScanProcessFunction extends KeyedProcessFunction[String, (String, mutable.HashSet[String], mutable.ArrayBuffer[Long],
     mutable.HashSet[String], mutable.HashSet[Long]), ((Object, Boolean), String)] {
     val verticalReceiveMessage: LongCounter = new LongCounter()
     val verticalResultToMysqlMessage: LongCounter = new LongCounter()
@@ -515,10 +501,10 @@ object LowVelocityScan {
       //全局配置
       val globalConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
       //todo 调参并写入ini 修改LOW_VELOCITY_SCAN_STATISTICS_TIMESTEP_SIZE_MAX
-      verticalTimeStepSize = globalConf.getLong(Constants.LOW_VELOCITY_SCAN_VERTICAL_STATISTICS_TIMESTEP_SIZE_MAX, 0L)
-      verticalTimeWindowCount = globalConf.getInteger(Constants.LOW_VELOCITY_SCAN_VERTICAL_STATISTICS_TIMEWINDOW_COUNT, 0)
-      verticalPreDipComentropy = globalConf.getDouble(Constants.LOW_VELOCITY_SCAN_VERTICAL_COMENTROPY, 0.00D)
-      verticalProbability = globalConf.getDouble(Constants.LOW_VELOCITY_SCAN_VERTICAL_INPUTOCTES_PROBABILITY, 0.00D)
+      verticalTimeStepSize = globalConf.getLong(ConfigOptions.key(Constants.LOW_VELOCITY_SCAN_VERTICAL_STATISTICS_TIMESTEP_SIZE_MAX).longType().defaultValue(0L))
+      verticalTimeWindowCount = globalConf.getInteger(ConfigOptions.key(Constants.LOW_VELOCITY_SCAN_VERTICAL_STATISTICS_TIMEWINDOW_COUNT).intType().defaultValue(0))
+      verticalPreDipComentropy = globalConf.getDouble(ConfigOptions.key(Constants.LOW_VELOCITY_SCAN_VERTICAL_COMENTROPY).doubleType().defaultValue(0.00D))
+      verticalProbability = globalConf.getDouble(ConfigOptions.key(Constants.LOW_VELOCITY_SCAN_VERTICAL_INPUTOCTES_PROBABILITY).doubleType().defaultValue(0.00D))
 
       getRuntimeContext.addAccumulator("vertical Received", verticalReceiveMessage)
       getRuntimeContext.addAccumulator("vertical ResultToMysql Message", verticalResultToMysqlMessage)
@@ -593,7 +579,7 @@ object LowVelocityScan {
     }
 
     override def processElement(value: (String, mutable.HashSet[String], ArrayBuffer[Long], mutable.HashSet[String],
-      mutable.HashSet[Long]), ctx: ProcessFunction[(String, mutable.HashSet[String], ArrayBuffer[Long], mutable.HashSet[String],
+      mutable.HashSet[Long]), ctx: KeyedProcessFunction[String, (String, mutable.HashSet[String], ArrayBuffer[Long], mutable.HashSet[String],
       mutable.HashSet[Long]), ((Object, Boolean), String)]#Context, out: Collector[((Object, Boolean), String)]): Unit = {
 
       val time = value._3.get(0)

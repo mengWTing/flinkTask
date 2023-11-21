@@ -9,11 +9,11 @@
 package cn.ffcs.is.mss.analyzer.flink.warn
 
 import cn.ffcs.is.mss.analyzer.bean.BbasDownloadCountWarnImproveEntity
-import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
+import cn.ffcs.is.mss.analyzer.flink.sink.{MySQLSink, Sink}
 import cn.ffcs.is.mss.analyzer.ml.iforest.IForest
 import cn.ffcs.is.mss.analyzer.utils._
 import cn.ffcs.is.mss.analyzer.utils.druid.entity._
-import org.apache.flink.configuration.Configuration
+import org.apache.flink.configuration.{ConfigOptions, Configuration}
 import org.apache.flink.streaming.api.functions.ProcessFunction
 import org.apache.flink.streaming.api.functions.source.{RichParallelSourceFunction, SourceFunction}
 import org.apache.flink.streaming.api.scala._
@@ -22,11 +22,13 @@ import org.apache.flink.streaming.util.serialization.SimpleStringSchema
 import org.apache.flink.util.Collector
 import org.apache.hadoop.fs.{FileSystem, Path}
 import org.json.JSONArray
-
 import java.io.{BufferedReader, InputStreamReader}
 import java.net.URI
 import java.sql.Timestamp
 import java.util.Properties
+
+import cn.ffcs.is.mss.analyzer.utils
+
 import scala.collection.JavaConversions._
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
@@ -98,20 +100,12 @@ object DownloadCount {
     parameters.setString(Constants.DRUID_OPERATION_TABLE_NAME, confProperties.getValue(Constants.FLINK_COMMON_CONFIG, Constants.DRUID_OPERATION_TABLE_NAME))
 
     //获取kafka生产者
-    val producer = new FlinkKafkaProducer[String](brokerList, kafkaSinkTopic, new SimpleStringSchema())
+    val producer = Sink.kafkaSink(brokerList, kafkaSinkTopic)
 
     //获取ExecutionEnvironment
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     //设置flink全局变量
     env.getConfig.setGlobalJobParameters(parameters)
-
-    //设置kafka消费者相关配置
-    val props = new Properties()
-    //设置kafka集群地址
-    props.setProperty("bootstrap.servers", brokerList)
-    //设置flink消费的group.id
-    props.setProperty("group.id", groupId)
-
 
     // 获取kafka数据
     val downloadCountStream = env.addSource(new QueryDruidSource(timeStamp)).setParallelism(druidSourceParallelism)
@@ -138,15 +132,14 @@ object DownloadCount {
       .map(o => {
         JsonUtil.toJson(o._1._1.asInstanceOf[BbasDownloadCountWarnImproveEntity])
       })
-      .addSink(producer)
+      .sinkTo(producer)
       .uid(kafkaSinkName)
       .name(kafkaSinkName)
       .setParallelism(kafkaSinkParallelism)
 
     //将告警数据写入告警库topic
-    val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
-        SimpleStringSchema())
-    alertKafkaValue.addSink(warningProducer).setParallelism(kafkaSinkParallelism)
+    val warningProducer = Sink.kafkaSink(brokerList, warningSinkTopic)
+    alertKafkaValue.sinkTo(warningProducer).setParallelism(kafkaSinkParallelism)
 
     env.execute(jobName)
 
@@ -172,13 +165,13 @@ object DownloadCount {
     override def open(parameters: Configuration): Unit = {
       val globConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
 
-      DateUtil.ini(globConf.getString(Constants.FILE_SYSTEM_TYPE, ""), globConf.getString(Constants.DATE_CONFIG_PATH, ""))
-      DruidUtil.setDruidHostPortSet(globConf.getString(Constants.DRUID_BROKER_HOST_PORT, ""))
-      DruidUtil.setTimeFormat(globConf.getString(Constants.DRUID_TIME_FORMAT, ""))
-      DruidUtil.setDateStartTimeStamp(globConf.getLong(Constants.DRUID_DATA_START_TIMESTAMP, 0L))
+      DateUtil.ini(globConf.getString(ConfigOptions.key(Constants.FILE_SYSTEM_TYPE).stringType().defaultValue("")),
+                   globConf.getString(ConfigOptions.key(Constants.DATE_CONFIG_PATH).stringType().defaultValue("")))
+      DruidUtil.setDruidHostPortSet(globConf.getString(ConfigOptions.key(Constants.DRUID_BROKER_HOST_PORT).stringType().defaultValue("")))
+      DruidUtil.setTimeFormat(globConf.getString(ConfigOptions.key(Constants.DRUID_TIME_FORMAT).stringType().defaultValue("")))
+      DruidUtil.setDateStartTimeStamp(globConf.getLong(ConfigOptions.key(Constants.DRUID_DATA_START_TIMESTAMP).longType().defaultValue(0L)))
 
-
-      tableName = globConf.getString(Constants.DRUID_OPERATION_TABLE_NAME, "")
+      tableName = globConf.getString(ConfigOptions.key(Constants.DRUID_OPERATION_TABLE_NAME).stringType().defaultValue(""))
     }
 
 
@@ -260,15 +253,15 @@ object DownloadCount {
       val globConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters
         .asInstanceOf[Configuration]
 
-      DateUtil.ini(globConf.getString(Constants.FILE_SYSTEM_TYPE, ""), globConf.getString(Constants.DATE_CONFIG_PATH, ""))
-      DruidUtil.setDruidHostPortSet(globConf.getString(Constants.DRUID_BROKER_HOST_PORT, ""))
-      DruidUtil.setTimeFormat(globConf.getString(Constants.DRUID_TIME_FORMAT, ""))
-      DruidUtil.setDateStartTimeStamp(globConf.getLong(Constants.DRUID_DATA_START_TIMESTAMP, 0L))
-      druidStartTime = globConf.getLong(Constants.DRUID_DATA_START_TIMESTAMP, 0L)
-
+      DateUtil.ini(globConf.getString(ConfigOptions.key(Constants.FILE_SYSTEM_TYPE).stringType().defaultValue("")),
+        globConf.getString(ConfigOptions.key(Constants.DATE_CONFIG_PATH).stringType().defaultValue("")))
+      DruidUtil.setDruidHostPortSet(globConf.getString(ConfigOptions.key(Constants.DRUID_BROKER_HOST_PORT).stringType().defaultValue("")))
+      DruidUtil.setTimeFormat(globConf.getString(ConfigOptions.key(Constants.DRUID_TIME_FORMAT).stringType().defaultValue("")))
+      DruidUtil.setDateStartTimeStamp(globConf.getLong(ConfigOptions.key(Constants.DRUID_DATA_START_TIMESTAMP).longType().defaultValue(0L)))
+      druidStartTime = globConf.getLong(ConfigOptions.key(Constants.DRUID_DATA_START_TIMESTAMP).longType().defaultValue(0L))
       //根据c3p0配置文件,初始化c3p0连接池
       val c3p0Properties = new Properties()
-      val c3p0ConfigPath = globConf.getString(Constants.c3p0_CONFIG_PATH, "")
+      val c3p0ConfigPath = globConf.getString(ConfigOptions.key(Constants.c3p0_CONFIG_PATH).stringType().defaultValue(""))
       val fs = FileSystem.get(URI.create(c3p0ConfigPath), new org.apache.hadoop.conf
       .Configuration())
       val fsDataInputStream = fs.open(new Path(c3p0ConfigPath))
@@ -279,7 +272,7 @@ object DownloadCount {
 
       //操作数据库的类
       sqlHelper = new SQLHelper()
-      tableName = globConf.getString(Constants.DRUID_OPERATION_TABLE_NAME, "")
+      tableName = globConf.getString(ConfigOptions.key(Constants.DRUID_OPERATION_TABLE_NAME).stringType().defaultValue(""))
       //根据工作日休息日，获取历史查询的开始和结束时间戳
       val timeStr = getTimeStr(timeStamp, druidStartTime)
       startTimeStr = timeStr._1

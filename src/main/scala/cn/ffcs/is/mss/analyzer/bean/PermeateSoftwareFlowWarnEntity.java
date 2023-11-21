@@ -15,10 +15,11 @@ import java.util.Objects;
  * @update [no][date YYYY-MM-DD][name][description]
  **/
 @Entity
-@Table(name = "permeate_software_flow_warn", schema = "SDFS", catalog = "")
+@Table(name = "permeate_software_flow_warn_test", schema = "SDFS", catalog = "")
 public class PermeateSoftwareFlowWarnEntity {
     private Timestamp alerttime;
     private String sourceip;
+    private String sourcePort;
     private String desip;
     private String username;
     private String alertHost;
@@ -28,6 +29,8 @@ public class PermeateSoftwareFlowWarnEntity {
     private String alertUseragent;
     private String alertAccept;
     private String alertType;
+    private String method;
+    private String connection;
 
     @Basic
     @Column(name = "alerttime")
@@ -47,6 +50,16 @@ public class PermeateSoftwareFlowWarnEntity {
 
     public void setSourceip(String sourceip) {
         this.sourceip = sourceip;
+    }
+
+    @Basic
+    @Column(name = "sourceport")
+    public String getSourcePort() {
+        return sourcePort;
+    }
+
+    public void setSourcePort(String sourcePort) {
+        this.sourcePort = sourcePort;
     }
 
     @Basic
@@ -139,16 +152,49 @@ public class PermeateSoftwareFlowWarnEntity {
         this.alertType = alertType;
     }
 
+    @Basic
+    @Column(name = "method")
+    public String getMethod() {
+        return method;
+    }
+
+    public void setMethod(String method) {
+        this.method = method;
+    }
+
+    @Basic
+    @Column(name = "connection")
+    public String getConnection() {
+        return connection;
+    }
+
+    public void setConnection(String connection) {
+        this.connection = connection;
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;
         if (o == null || getClass() != o.getClass()) return false;
         PermeateSoftwareFlowWarnEntity that = (PermeateSoftwareFlowWarnEntity) o;
-        return Objects.equals(alerttime, that.alerttime) && Objects.equals(sourceip, that.sourceip) && Objects.equals(desip, that.desip) && Objects.equals(username, that.username) && Objects.equals(alertHost, that.alertHost) && Objects.equals(alertUrl, that.alertUrl) && Objects.equals(alertCookie, that.alertCookie) && Objects.equals(alertXff, that.alertXff) && Objects.equals(alertUseragent, that.alertUseragent) && Objects.equals(alertAccept, that.alertAccept) && Objects.equals(alertType, that.alertType);
+        return Objects.equals(alerttime, that.alerttime) &&
+                Objects.equals(sourceip, that.sourceip) &&
+                Objects.equals(sourcePort, that.sourcePort) &&
+                Objects.equals(desip, that.desip) &&
+                Objects.equals(username, that.username) &&
+                Objects.equals(alertHost, that.alertHost) &&
+                Objects.equals(alertUrl, that.alertUrl) &&
+                Objects.equals(alertCookie, that.alertCookie) &&
+                Objects.equals(alertXff, that.alertXff) &&
+                Objects.equals(alertUseragent, that.alertUseragent) &&
+                Objects.equals(alertAccept, that.alertAccept) &&
+                Objects.equals(alertType, that.alertType) &&
+                Objects.equals(method, that.method) &&
+                Objects.equals(connection, that.connection);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(alerttime, sourceip, desip, username, alertHost, alertUrl, alertCookie, alertXff, alertUseragent, alertAccept, alertType);
+        return Objects.hash(alerttime, sourceip, sourcePort, desip, username, alertHost, alertUrl, alertCookie, alertXff, alertUseragent, alertAccept, alertType, method, connection);
     }
 }

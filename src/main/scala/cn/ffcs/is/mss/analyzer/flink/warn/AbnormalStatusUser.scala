@@ -12,23 +12,22 @@ import java.io.{BufferedReader, InputStreamReader}
 import java.net.URI
 import java.sql.Timestamp
 import java.util.Properties
-import java.util.concurrent.{ExecutorService, Executors, ThreadPoolExecutor}
+import java.util.concurrent.{ExecutorService, Executors}
 
-import cn.ffcs.is.mss.analyzer.bean.{BbasAbnormalStatusUserWarnEntity, CtPostInfoEntity}
+import cn.ffcs.is.mss.analyzer.bean.{BbasAbnormalStatusUserWarnEntity}
 import cn.ffcs.is.mss.analyzer.druid.model.scala.OperationModel
-import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
+import cn.ffcs.is.mss.analyzer.flink.sink.{MySQLSink, Sink}
+import cn.ffcs.is.mss.analyzer.flink.source.Source
 import cn.ffcs.is.mss.analyzer.utils._
+import org.apache.flink.api.common.eventtime.WatermarkStrategy
 import org.apache.flink.api.common.functions.RichFilterFunction
-import org.apache.flink.configuration.Configuration
+import org.apache.flink.configuration.{ConfigOptions, Configuration}
 import org.apache.flink.streaming.api.functions.ProcessFunction
 import org.apache.flink.streaming.api.scala._
-import org.apache.flink.streaming.connectors.kafka.{FlinkKafkaConsumer, FlinkKafkaProducer}
-import org.apache.flink.streaming.util.serialization.SimpleStringSchema
 import org.apache.flink.util.Collector
 import org.apache.hadoop.fs.{FileSystem, Path}
 import redis.clients.jedis.{Jedis, JedisPool, JedisPubSub}
 
-import scala.collection.mutable
 import scala.collection.JavaConversions._
 
 /**
@@ -43,8 +42,8 @@ object AbnormalStatusUser {
   def main(args: Array[String]): Unit = {
 
     //根据传入的参数解析配置文件
-    //val args0 = "/Users/chenwei/IdeaProjects/mss/src/main/resources/flink.ini"
-    //val confProperties = new IniProperties(args0)
+//    val args0 = "G:\\ffcs\\4_Code\\mss\\src\\main\\resources\\flink.ini"
+//    val confProperties = new IniProperties(args0)
     val confProperties = new IniProperties(args(0))
 
     //该任务的名字
@@ -97,28 +96,20 @@ object AbnormalStatusUser {
     //获取ExecutionEnvironment
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     //设置check pointing的间隔
-    env.enableCheckpointing(checkpointInterval)
+//    env.enableCheckpointing(checkpointInterval)
     //设置flink全局变量
     env.getConfig.setGlobalJobParameters(parameters)
-
-    //设置kafka消费者相关配置
-    val props = new Properties()
-    //设置kafka集群地址
-    props.setProperty("bootstrap.servers", brokerList)
-    //设置flink消费的group.id
-    props.setProperty("group.id", groupId)
+    //禁用事件时间，设置水位线间隔时间为0，实际则为处理时间
+    env.getConfig.setAutoWatermarkInterval(0)
 
 
     //获取kafka消费者
-    val consumer = new FlinkKafkaConsumer[String](kafkaSourceTopic, new SimpleStringSchema, props).setStartFromGroupOffsets()
+    val consumer = Source.kafkaSource(kafkaSourceTopic, groupId, brokerList)
     //获取kafka生产者
-    val producer = new FlinkKafkaProducer[String](brokerList, kafkaSinkTopic, new SimpleStringSchema())
-
+    val producer = Sink.kafkaSink(brokerList, kafkaSinkTopic)
     // 获取kafka数据
-    val dStream = env.addSource(consumer).setParallelism(kafkaSourceParallelism)
-      .uid(kafkaSourceName).name(kafkaSourceName)
-
-
+    val dStream = env.fromSource(consumer, WatermarkStrategy.noWatermarks(), kafkaSourceName).setParallelism(kafkaSourceParallelism)
+    .uid(kafkaSourceName).name(kafkaSourceName)
     val abnormalStatusUserStream = dStream
       //            .map(OperationModel.getOperationModel _)
       //            .filter(_.isDefined)
@@ -135,15 +126,14 @@ object AbnormalStatusUser {
 
     abnormalStatusUserStream
       .map(o => {JsonUtil.toJson(o._1._1.asInstanceOf[BbasAbnormalStatusUserWarnEntity])})
-      .addSink(producer)
+      .sinkTo(producer)
       .uid(kafkaSinkName)
       .name(kafkaSinkName)
       .setParallelism(kafkaSinkParallelism)
 
     //将告警数据写入告警库topic
-    val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
-        SimpleStringSchema())
-    alertKafkaValue.addSink(warningProducer).setParallelism(kafkaSinkParallelism)
+    val warningProducer = Sink.kafkaSink(brokerList, warningSinkTopic)
+    alertKafkaValue.sinkTo(warningProducer).setParallelism(kafkaSinkParallelism)
     env.execute(jobName)
 
   }
@@ -174,8 +164,9 @@ object AbnormalStatusUser {
 
       //根据redis配置文件,初始化redis连接池
       val jedisProperties = new Properties()
-      val jedisConfigPath = globConf.getString(Constants.REDIS_CONFIG_PATH, "")
-      val fileSystemType = globConf.getString(Constants.FILE_SYSTEM_TYPE, "/")
+      val jedisConfigPath = globConf.getString(ConfigOptions.key(Constants.REDIS_CONFIG_PATH).stringType().defaultValue(""))
+      val fileSystemType = globConf.getString(ConfigOptions.key(Constants.FILE_SYSTEM_TYPE).stringType().defaultValue("/"))
+
       val fs = FileSystem.get(URI.create(fileSystemType), new org.apache.hadoop.conf
       .Configuration())
       val fsDataInputStream = fs.open(new Path(jedisConfigPath))
@@ -185,13 +176,13 @@ object AbnormalStatusUser {
       jedisPool = JedisUtil.getJedisPool(jedisProperties)
       jedis = jedisPool.getResource
 
-      USER_STATUS_KEY = globConf.getString(Constants.ABNORMAL_STATUS_USER_USER_STATUS_REDIS_KEY, "")
-      CHANNEL_NAME = globConf.getString(Constants.ABNORMAL_STATUS_USER_CHANNEL_NAME, "")
+      USER_STATUS_KEY = globConf.getString(ConfigOptions.key(Constants.ABNORMAL_STATUS_USER_USER_STATUS_REDIS_KEY).stringType().defaultValue(""))
+      CHANNEL_NAME = globConf.getString(ConfigOptions.key(Constants.ABNORMAL_STATUS_USER_CHANNEL_NAME).stringType().defaultValue(""))
       USER_STATUS_MAP = getUserStatusMap(jedis, USER_STATUS_KEY)
 
       //根据c3p0配置文件,初始化c3p0连接池
       val c3p0Properties = new Properties()
-      val c3p0ConfigPath = globConf.getString(Constants.c3p0_CONFIG_PATH, "")
+      val c3p0ConfigPath = globConf.getString(ConfigOptions.key(Constants.c3p0_CONFIG_PATH).stringType().defaultValue(""))
       c3p0Properties.load(new BufferedReader(new InputStreamReader(fs.open(new Path(c3p0ConfigPath)))))
       C3P0Util.ini(c3p0Properties)
 

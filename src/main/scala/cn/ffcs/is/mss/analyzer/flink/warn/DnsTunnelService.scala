@@ -7,12 +7,14 @@ import java.util.Properties
 
 import cn.ffcs.is.mss.analyzer.bean.DnsTunnelServiceEntity
 import cn.ffcs.is.mss.analyzer.druid.model.scala.DnsModel
-import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
+import cn.ffcs.is.mss.analyzer.flink.sink.{MySQLSink, Sink}
+import cn.ffcs.is.mss.analyzer.flink.source.Source
 import cn.ffcs.is.mss.analyzer.ml.svm._
 import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties, JsonUtil}
 import org.apache.flink.api.common.accumulators.LongCounter
+import org.apache.flink.api.common.eventtime.WatermarkStrategy
 import org.apache.flink.api.common.functions.RichFilterFunction
-import org.apache.flink.configuration.Configuration
+import org.apache.flink.configuration.{ConfigOptions, Configuration}
 import org.apache.flink.streaming.api.TimeCharacteristic
 import org.apache.flink.streaming.api.functions.ProcessFunction
 import org.apache.flink.streaming.api.scala._
@@ -97,32 +99,21 @@ object DnsTunnelService {
     parameters.setDouble(Constants.DNS_TUNNENL_SERVICE_SVM_MODEL_ACCURACY, confProperties.getFloatValue(Constants.
       DNS_TUNNENL_SERVICE_CONFIG, Constants.DNS_TUNNENL_SERVICE_SVM_MODEL_ACCURACY))
 
-    //设置kafka消费者相关配置
-    val props = new Properties()
-    //设置kafka集群地址
-    props.setProperty("bootstrap.servers", brokerList)
-    //设置flink消费的group.id
-    props.setProperty("group.id", groupId + "test")
     //获取kafka消费者
-    val consumer = new FlinkKafkaConsumer[String](topic, new SimpleStringSchema, props)
-      .setStartFromLatest()
+    val consumer = Source.kafkaSource(topic, groupId, brokerList)
     //获取kafka 生产者
-    val producer = new FlinkKafkaProducer[String](brokerList, kafkaSinkTopic, new
-        SimpleStringSchema())
+    val producer = Sink.kafkaSink(brokerList, kafkaSinkTopic)
 
     //获取ExecutionEnvironment
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     //设置check pointing的间隔
     //env.enableCheckpointing(checkpointInterval)
-    //设置流的时间为EventTime
-    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
     //设置flink全局变量
     env.getConfig.setGlobalJobParameters(parameters)
 
     //获取数据流
-
-    val dStream = env.addSource(consumer).setParallelism(sourceParallelism)
-      //    val dStream = env.socketTextStream("192.168.1.105", 8899)
+      val dStream = env.fromSource(consumer, WatermarkStrategy.noWatermarks(), "kafkaSource").setParallelism(sourceParallelism)
+  //    val dStream = env.socketTextStream("192.168.1.105", 8899)
       .map(JsonUtil.fromJson[DnsModel] _).setParallelism(dealParallelism)
       //过滤白名单中的dns
       .filter(new WhiteListFilterFunction).setParallelism(dealParallelism)
@@ -137,13 +128,12 @@ object DnsTunnelService {
       .map(o => {
         JsonUtil.toJson(o._1._1.asInstanceOf[DnsTunnelServiceEntity])
       })
-      .addSink(producer)
+      .sinkTo(producer)
       .setParallelism(sinkParallelism)
 
     //将告警数据写入告警库topic
-    val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
-        SimpleStringSchema())
-    alertKafkaValue.addSink(warningProducer).setParallelism(sinkParallelism)
+    val warningProducer = Sink.kafkaSink(brokerList, warningSinkTopic)
+    alertKafkaValue.sinkTo(warningProducer).setParallelism(sinkParallelism)
 
     env.execute(jobName)
 
@@ -165,7 +155,7 @@ object DnsTunnelService {
 
     override def open(parameters: Configuration): Unit = {
       val globConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
-      val dnsWhiteList = globConf.getString(Constants.DNS_TUNNENL_SERVICE_WHITE_LIST, "")
+      val dnsWhiteList = globConf.getString(ConfigOptions.key(Constants.DNS_TUNNENL_SERVICE_WHITE_LIST).stringType().defaultValue(""))
       dnsWhiteArr = dnsWhiteList.trim.split("\\|", -1).toList
     }
 
@@ -234,14 +224,18 @@ object DnsTunnelService {
     //读取样本数据训练
     override def open(parameters: Configuration): Unit = {
       val globConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
-      sampleDataPath = globConf.getString(Constants.DNS_TUNNENL_SERVICE_TRAIN_DATA_PATH, "")
+       sampleDataPath = globConf.getString(ConfigOptions.key(Constants.DNS_TUNNENL_SERVICE_TRAIN_DATA_PATH).stringType().defaultValue(""))
       //svm内部逻辑三个参数
-      svmC = globConf.getDouble(Constants.DNS_TUNNENL_SERVICE_SVM_PUN_FACTOR, 0.0D)
-      svmTol = globConf.getDouble(Constants.DNS_TUNNENL_SERVICE_SVM_TOL_LIMIT, 0.01D)
-      svmMaxPasses = globConf.getInteger(Constants.DNS_TUNNENL_SERVICE_SVM_MAXPASSES, 0)
+      svmC = globConf.getDouble(ConfigOptions.key(Constants.DNS_TUNNENL_SERVICE_SVM_PUN_FACTOR).doubleType().defaultValue(0.0D))
+      svmTol = globConf.getDouble(ConfigOptions.key(Constants.DNS_TUNNENL_SERVICE_SVM_TOL_LIMIT).doubleType().defaultValue(0.01D))
+      svmMaxPasses = globConf.getInteger(ConfigOptions.key(Constants.DNS_TUNNENL_SERVICE_SVM_MAXPASSES).intType().defaultValue(0))
+
+
       //标准参数
-      verifyDataCount = globConf.getInteger(Constants.DNS_TUNNENL_SERVICE_SVM_VERIFY_DATA, 0)
-      modelAccuracy = globConf.getDouble(Constants.DNS_TUNNENL_SERVICE_SVM_MODEL_ACCURACY, 0D)
+      verifyDataCount = globConf.getInteger(ConfigOptions.key(Constants.DNS_TUNNENL_SERVICE_SVM_VERIFY_DATA).intType().defaultValue(0))
+      modelAccuracy = globConf.getDouble(ConfigOptions.key(Constants.DNS_TUNNENL_SERVICE_SVM_MODEL_ACCURACY).doubleType().defaultValue(0D))
+
+
       //计数器
       getRuntimeContext.addAccumulator("model train acc", modelscc)
 
@@ -257,7 +251,7 @@ object DnsTunnelService {
        * @description 读取hdfs 读取训练样本 获取最大的char_index
        * @update [no][date YYYY-MM-DD][name][description]
        */
-      val systemType = globConf.getString(Constants.FILE_SYSTEM_TYPE, "")
+      val systemType = globConf.getString(ConfigOptions.key(Constants.FILE_SYSTEM_TYPE).stringType().defaultValue(""))
       val fs = FileSystem.get(URI.create(systemType), new org.apache.hadoop.conf.Configuration())
       val fsDataInputStream = fs.open(new Path(sampleDataPath))
       val bufferedReader = new BufferedReader(new InputStreamReader(fsDataInputStream))
@@ -287,7 +281,7 @@ object DnsTunnelService {
        * @update [no][date YYYY-MM-DD][name][description]
        */
 
-      val systemTypeTrait = globConf.getString(Constants.FILE_SYSTEM_TYPE, "")
+      val systemTypeTrait = globConf.getString(ConfigOptions.key(Constants.FILE_SYSTEM_TYPE).stringType().defaultValue(""))
       val fsTrait = FileSystem.get(URI.create(systemTypeTrait), new org.apache.hadoop.conf.Configuration())
       val fsDataInputStreamTrait = fsTrait.open(new Path(sampleDataPath))
       val bufferedReaderTrait = new BufferedReader(new InputStreamReader(fsDataInputStreamTrait))

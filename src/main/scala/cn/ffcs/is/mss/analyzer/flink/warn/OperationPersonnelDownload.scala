@@ -4,18 +4,17 @@ import java.io.{BufferedReader, InputStreamReader}
 import java.net.URI
 import java.sql.Timestamp
 import java.util.Properties
-import java.util.regex.Pattern
 import cn.ffcs.is.mss.analyzer.bean.BbasOperationPersonnelDownloadEntity
 import cn.ffcs.is.mss.analyzer.druid.model.scala.OperationModel
-import cn.ffcs.is.mss.analyzer.flink.sink.MySQLSink
+import cn.ffcs.is.mss.analyzer.flink.sink.{MySQLSink, Sink}
+import cn.ffcs.is.mss.analyzer.flink.source.Source
 import cn.ffcs.is.mss.analyzer.utils.GetInputKafkaValue.getInputKafkaValue
 import cn.ffcs.is.mss.analyzer.utils.{Constants, IniProperties, JsonUtil}
+import org.apache.flink.api.common.eventtime.WatermarkStrategy
 import org.apache.flink.api.common.functions.RichMapFunction
-import org.apache.flink.configuration.Configuration
+import org.apache.flink.configuration.{ConfigOptions, Configuration}
 import org.apache.flink.streaming.api.functions.ProcessFunction
 import org.apache.flink.streaming.api.scala._
-import org.apache.flink.streaming.connectors.kafka.{FlinkKafkaConsumer, FlinkKafkaProducer}
-import org.apache.flink.streaming.util.serialization.SimpleStringSchema
 import org.apache.flink.util.Collector
 
 import scala.collection.mutable
@@ -78,27 +77,19 @@ object OperationPersonnelDownload {
     //获取ExecutionEnvironment
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     //设置check pointing的间隔
-    env.enableCheckpointing(checkpointInterval)
+//    env.enableCheckpointing(checkpointInterval)
     //设置flink全局变量
     env.getConfig.setGlobalJobParameters(parameters)
 
-    //设置kafka消费者相关配置
-    val props = new Properties()
-    //设置kafka集群地址
-    props.setProperty("bootstrap.servers", brokerList)
-    //设置flink消费的group.id
-    props.setProperty("group.id", groupId)
-
+    env.getConfig.setAutoWatermarkInterval(0)
     //获取kafka消费者
-    val consumer = new FlinkKafkaConsumer[String](kafkaSourceTopic, new SimpleStringSchema, props).setStartFromGroupOffsets()
+    val consumer = Source.kafkaSource(kafkaSourceTopic, groupId, brokerList)
     //获取kafka生产者
-    val producer = new FlinkKafkaProducer[String](brokerList, kafkaSinkTopic, new SimpleStringSchema())
-    val warningProducer = new FlinkKafkaProducer[String](brokerList, warningSinkTopic, new
-        SimpleStringSchema())
-
+    val producer = Sink.kafkaSink(brokerList, kafkaSinkTopic)
+    val warningProducer = Sink.kafkaSink(brokerList, warningSinkTopic)
     // 获取kafka数据
-    val dStream = env.addSource(consumer).setParallelism(kafkaSourceParallelism)
-      .uid(kafkaSourceName).name(kafkaSourceName)
+    val dStream = env.fromSource(consumer, WatermarkStrategy.noWatermarks(), kafkaSourceName).setParallelism(kafkaSourceParallelism)
+        .uid(kafkaSourceName).name(kafkaSourceName)
 
     //ip-地点关联文件路径
     val placePath = confProperties.getValue(Constants.OPERATION_FLINK_TO_DRUID_CONFIG, Constants.OPERATION_PLACE_PATH)
@@ -133,11 +124,11 @@ object OperationPersonnelDownload {
       .map(o => {
         JsonUtil.toJson(o._1.asInstanceOf[BbasOperationPersonnelDownloadEntity])
       })
-      .addSink(producer)
+      .sinkTo(producer)
       .uid(kafkaSinkName)
       .name(kafkaSinkName)
       .setParallelism(kafkaSinkParallelism)
-    alertKafkaValue.addSink(warningProducer).setParallelism(kafkaSinkParallelism)
+    alertKafkaValue.sinkTo(warningProducer).setParallelism(kafkaSinkParallelism)
     env.execute(jobName)
 
   }
@@ -153,8 +144,7 @@ object OperationPersonnelDownload {
       val globConf = getRuntimeContext.getExecutionConfig.getGlobalJobParameters.asInstanceOf[Configuration]
 
       operationPersonnelMap = mutable.Map[String, (String, String, String, String)]()
-      val personnelPath = globConf.getString(Constants.OPERATION_PERSONNEL_DOWNLOAD_OPERATION_PERSONNEL_PATH, "")
-
+      val personnelPath = globConf.getString(ConfigOptions.key(Constants.OPERATION_PERSONNEL_DOWNLOAD_OPERATION_PERSONNEL_PATH).stringType().defaultValue(""))
       val fileSystem = org.apache.hadoop.fs.FileSystem.get(URI.create(personnelPath), new org.apache.hadoop.conf.Configuration())
 
 
